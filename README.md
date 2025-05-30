@@ -312,4 +312,4 @@ Customers are responsible for making their own independent assessment of the inf
 
 ## Authors
 
-- Felix Huthmacher, Senior Applied AI Architect (fhuthmacher)[https://github.com/fhuthmacher]
+- Felix Huthmacher, Senior Applied AI Architect [github - fhuthmacher](https://github.com/fhuthmacher)

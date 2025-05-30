@@ -58,7 +58,7 @@ The architecture is organized into several logical stacks:
 
 You are responsible for the cost of the AWS services used while running this Guidance. As of May 2025, the cost for running this Guidance with the default settings in the AWS Region US East 1 (N. Virginia) is approximately $<n.nn> per month for processing ( <nnnnn> records ).
 
-We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance.
+We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance.
 
 ### Sample Cost Table
 
@@ -78,6 +78,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | Amazon Route 53 | Hosted Zones (1) | 0.90 |
 | Amazon Bedrock | Number of Input tokens (10 million per month), Number of output tokens (1 million per month), Number of Input tokens (10 million per month) | 11.40 |
 | Amazon OpenSearch Service | How many Indexing OCUs? (1), How many Search and Query OCUs? (1), How big is the index data? (1 GB) | 350.42 |
+| **Total** | **Monthly Cost for All Services** | **529.63** |
 
 
 ## Prerequisites

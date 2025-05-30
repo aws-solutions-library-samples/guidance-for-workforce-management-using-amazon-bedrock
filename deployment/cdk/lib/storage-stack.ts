@@ -1,0 +1,281 @@
+import * as cdk from "aws-cdk-lib";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as route53targets from "aws-cdk-lib/aws-route53-targets";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as cr from "aws-cdk-lib/custom-resources";
+import { Construct } from "constructs";
+
+export interface StorageStackProps extends cdk.StackProps {
+  resourcePrefix: string;
+  environment: string;
+  domainName: string;
+  certificateArn: string;
+  parentDomainName: string;
+}
+
+export class StorageStack extends cdk.Stack {
+  public readonly websiteBucket: s3.Bucket;
+  public readonly dataBucket: s3.Bucket;
+  public readonly tables: { [key: string]: dynamodb.Table } = {};
+  public readonly cloudFrontDistribution: cloudfront.Distribution;
+
+  constructor(scope: Construct, id: string, props: StorageStackProps) {
+    super(scope, id, props);
+
+    const resourcePrefix = props.resourcePrefix;
+    const domainName = props.domainName;
+    const certificateArn = props.certificateArn;
+    const parentDomainName = props.parentDomainName;
+
+    if (!domainName || !certificateArn || !parentDomainName) {
+      throw new Error('domainName, certificateArn, and parentDomainName must be provided when creating the StorageStack');
+    }
+
+    // Create a CloudFront distribution and S3 bucket for hosting the web page
+    this.websiteBucket = new s3.Bucket(this, `${resourcePrefix}-WebsiteBucket`, {
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // NOT recommended for production
+      autoDeleteObjects: true, // NOT recommended for production
+    });
+
+    const CacheDisabledPolicy = new cloudfront.CachePolicy(this, `${resourcePrefix}-CachePolicy`, {
+      cachePolicyName: `${resourcePrefix}-cache-disabled-policy`,
+      comment: 'Cache policy with caching disabled',
+      defaultTtl: cdk.Duration.days(0),
+      minTtl: cdk.Duration.minutes(0),
+      maxTtl: cdk.Duration.days(0),
+    });
+    
+    // Create the CloudFront distribution
+    this.cloudFrontDistribution = new cloudfront.Distribution(this, `${resourcePrefix}-Distribution`, {
+      defaultBehavior: {
+        origin: new origins.S3Origin(this.websiteBucket),
+        cachePolicy: CacheDisabledPolicy,
+      },
+      defaultRootObject: 'index.html',
+      domainNames: [`${domainName}`],
+      certificate: acm.Certificate.fromCertificateArn(this, `${resourcePrefix}-ImportedCertificate`, certificateArn),
+    });
+
+    // Create the S3 bucket policy after the CloudFront distribution
+    this.websiteBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [this.websiteBucket.arnForObjects('*')],
+        principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
+        conditions: {
+          StringEquals: {
+            'AWS:SourceArn': `arn:aws:cloudfront::${cdk.Stack.of(this).account}:distribution/${this.cloudFrontDistribution.distributionId}`
+          }
+        }
+      })
+    );
+
+    // Output the S3 bucket name
+    new cdk.CfnOutput(this, `${resourcePrefix}-WebsiteBucketName`, {
+      value: this.websiteBucket.bucketName,
+    });
+    
+    // Output the CloudFront distribution domain name
+    new cdk.CfnOutput(this, `${resourcePrefix}-CloudFrontDistributionDomainName`, {
+      value: this.cloudFrontDistribution.distributionDomainName,
+    });
+
+    // Import the existing hosted zone
+    const hostedZone = route53.HostedZone.fromLookup(this, `${resourcePrefix}-ExistingHostedZone`, {
+      domainName: parentDomainName,
+    });
+
+    // Create a custom resource to check if the record exists
+    const checkRecordExists = new cr.AwsCustomResource(this, `${resourcePrefix}-CheckRecordExists`, {
+      onCreate: {
+        service: 'Route53',
+        action: 'listResourceRecordSets',
+        parameters: {
+          HostedZoneId: hostedZone.hostedZoneId,
+          StartRecordName: domainName,
+          StartRecordType: 'A',
+          MaxItems: '1'
+        },
+        physicalResourceId: cr.PhysicalResourceId.of('RecordCheck')
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE
+      })
+    });
+
+    // Create A record only if it doesn't exist
+    const aliasRecord = new route53.ARecord(this, `${resourcePrefix}-AliasRecord`, {
+      zone: hostedZone,
+      target: route53.RecordTarget.fromAlias(
+        new route53targets.CloudFrontTarget(this.cloudFrontDistribution)
+      ),
+      ttl: cdk.Duration.minutes(5),
+      recordName: domainName,
+      // Only create if the record doesn't exist
+      deleteExisting: false,
+    });
+
+    // Add dependency to ensure the check happens first
+    aliasRecord.node.addDependency(checkRecordExists);
+
+    // Create a data bucket for storing assets
+    this.dataBucket = new s3.Bucket(this, `${resourcePrefix}-DataBucket`, {
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
+    // Output the S3 bucket name
+    new cdk.CfnOutput(this, `${resourcePrefix}-DataBucketName`, {
+      value: this.dataBucket.bucketName,
+    });
+
+
+    // Create DynamoDB tables for synthetic data
+    this.tables['sessionHistory'] = new dynamodb.Table(this, `${resourcePrefix}-SessionHistoryTable`, {
+      tableName: `${resourcePrefix}-SESSION-HISTORY-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'userId_sessionId',
+        type: dynamodb.AttributeType.STRING
+      },
+      sortKey: {
+        name: 'timestamp',
+        type: dynamodb.AttributeType.NUMBER
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['userTasks'] = new dynamodb.Table(this, `${resourcePrefix}-UserTasksTable`, {
+      tableName: `${resourcePrefix}-TASKLIST-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'userId',
+        type: dynamodb.AttributeType.STRING
+      },
+      sortKey: {
+        name: 'taskId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['userRole'] = new dynamodb.Table(this, `${resourcePrefix}-UserRoleTable`, {
+      tableName: `${resourcePrefix}-USERROLE-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'userId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['customer'] = new dynamodb.Table(this, `${resourcePrefix}-CustomerTable`, {
+      tableName: `${resourcePrefix}-CUSTOMER-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'customerId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['dailyTasksByDay'] = new dynamodb.Table(this, `${resourcePrefix}-DailyTasksByDayTable`, {
+      tableName: `${resourcePrefix}-DAILY_TASKS_BY_DAY-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'taskId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['schedule'] = new dynamodb.Table(this, `${resourcePrefix}-ScheduleTable`, {
+      tableName: `${resourcePrefix}-SCHEDULE-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'userId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['timeoff'] = new dynamodb.Table(this, `${resourcePrefix}-TimeoffTable`, {
+      tableName: `${resourcePrefix}-TIMEOFF-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'userId',
+        type: dynamodb.AttributeType.STRING
+      },
+      sortKey: {
+        name: 'timeoffId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['products'] = new dynamodb.Table(this, `${resourcePrefix}-ProductsTable`, {
+      tableName: `${resourcePrefix}-PRODUCTS-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'productId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['customerTransactions'] = new dynamodb.Table(this, `${resourcePrefix}-CustomerTransactionsTable`, {
+      tableName: `${resourcePrefix}-CUSTOMER_TRANSACTIONS-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'customerId',
+        type: dynamodb.AttributeType.STRING
+      },
+      sortKey: {
+        name: 'transactionId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['feedback'] = new dynamodb.Table(this, `${resourcePrefix}-FeedbackTable`, {
+      tableName: `${resourcePrefix}-FEEDBACK-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'messageId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.tables['images'] = new dynamodb.Table(this, `${resourcePrefix}-ImagesTable`, {
+      tableName: `${resourcePrefix}-IMAGES-${props.environment || 'DEV'}`,
+      partitionKey: {
+        name: 'imageId',
+        type: dynamodb.AttributeType.STRING
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+  }
+}
+

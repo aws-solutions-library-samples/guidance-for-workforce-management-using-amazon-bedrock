@@ -1,0 +1,296 @@
+/* Custom styles for AWS Amplify Authenticator */
+
+/* Reset all Amplify UI styles to use light theme */
+
+/* Set all background colors to white */
+.amplify-authenticator {
+  --amplify-colors-background-primary: #FFFFFF;
+  --amplify-colors-background-secondary: #F5F5F5;
+  --amplify-colors-font-primary: #000000;
+  --amplify-colors-font-secondary: #666666;
+  --amplify-colors-font-interactive: #4285F4;
+  --amplify-colors-brand-primary-80: #4285F4;
+  --amplify-colors-brand-primary-90: #3367D6;
+  --amplify-colors-brand-primary-100: #2A56C6;
+  --amplify-colors-border-primary: #E0E0E0;
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form container */
+.amplify-authenticator [data-amplify-authenticator-signin] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-form] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields container */
+.amplify-authenticator [data-amplify-container] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-fieldset] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-field] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-label] {
+  background-color: #FFFFFF;
+  color: #000000;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-input] {
+  background-color: #FFFFFF;
+  color: #000000;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-button] {
+  background-color: #4285F4;
+  color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-section] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-footer] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-router] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-form-section] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-form-field] {
+  background-color: #FFFFFF;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-username-label],
+.amplify-authenticator [data-amplify-password-label] {
+  background-color: #FFFFFF;
+  color: #000000;
+}
+
+/* Override the dark background for the form fields */
+.amplify-authenticator [data-amplify-username],
+.amplify-authenticator [data-amplify-password] {
+  background-color: #FFFFFF;
+}
+
+/* Style the primary button */
+.amplify-button[data-variation='primary'] {
+  background-color: #4285F4;
+  color: #FFFFFF;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 12px;
+  height: 48px;
+  text-transform: none;
+  font-size: 16px;
+}
+
+/* Style the input fields */
+.amplify-field-group__control {
+  border-radius: 8px;
+  border-color: #E0E0E0;
+  height: 48px;
+  background-color: #FFFFFF;
+}
+
+.amplify-input {
+  height: 48px;
+  font-size: 16px;
+  padding: 12px 16px;
+  background-color: #FFFFFF;
+  color: #000000;
+}
+
+/* Style the labels */
+.amplify-field__label {
+  color: #000000;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  background-color: #FFFFFF;
+}
+
+/* Mobile-specific styles */
+@media (max-width: 600px) {
+  .amplify-authenticator [data-amplify-router] {
+    box-shadow: none;
+    border: none;
+    max-width: 100%;
+    width: 100%;
+    height: 100vh;
+    border-radius: 0;
+  }
+  
+  .amplify-authenticator [data-amplify-form] {
+    padding: 16px;
+  }
+  
+  .amplify-authenticator {
+    padding: 0;
+  }
+}
+
+/* Custom authenticator class */
+.custom-authenticator {
+  --amplify-components-button-primary-color: #FFFFFF !important;
+  --amplify-colors-background-primary: #FFFFFF !important;
+  --amplify-colors-background-secondary: #F5F5F5 !important;
+  --amplify-colors-font-primary: #000000 !important;
+  --amplify-colors-font-secondary: #666666 !important;
+  --amplify-colors-font-interactive: #4285F4 !important;
+}
+
+/* Override dark background with light theme */
+.custom-authenticator [data-amplify-authenticator-signin] {
+  background-color: #FFFFFF !important;
+}
+
+.custom-authenticator [data-amplify-container] {
+  background-color: #FFFFFF !important;
+}
+
+.custom-authenticator [data-amplify-form] {
+  background-color: #FFFFFF !important;
+}
+
+/* Fix label colors */
+.custom-authenticator .amplify-field__label {
+  color: #000000 !important;
+  font-weight: 500 !important;
+}
+
+/* Fix field backgrounds */
+.custom-authenticator .amplify-field-group__control {
+  background-color: #FFFFFF !important;
+  border-color: #E0E0E0 !important;
+}
+
+.custom-authenticator .amplify-input {
+  background-color: #FFFFFF !important;
+  color: #000000 !important;
+}
+
+.custom-authenticator .amplify-input::placeholder {
+  color: #9E9E9E !important;
+}
+
+/* Fix field backgrounds */
+.custom-authenticator [data-amplify-field] {
+  background-color: #FFFFFF !important;
+}
+
+.custom-authenticator [data-amplify-field] * {
+  background-color: #FFFFFF !important;
+}
+
+/* Fix label container */
+.custom-authenticator [data-amplify-label] {
+  background-color: #FFFFFF !important;
+  color: #000000 !important;
+}
+
+/* Fix field container */
+.custom-authenticator [data-amplify-fieldset] {
+  background-color: #FFFFFF !important;
+}
+
+/* Fix the dark background in the field areas */
+.custom-authenticator .amplify-field {
+  background-color: #FFFFFF !important;
+}
+
+.custom-authenticator .amplify-field * {
+  background-color: #FFFFFF !important;
+}
+
+/* Sign in button - make text visible */
+.custom-authenticator .amplify-button[data-variation='primary'] {
+  background-color: #4285F4 !important;
+  color: #FFFFFF !important;
+  font-weight: 500 !important;
+  margin-top: 10px !important;
+  margin-bottom: 24px !important;
+  height: 48px !important;
+  font-size: 16px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3) !important;
+  position: relative;
+  overflow: visible;
+}
+
+/* Target the button text specifically */
+.custom-authenticator .amplify-button[data-variation='primary']::after {
+  content: "Sign in";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #FFFFFF;
+  font-size: 16px;
+  font-weight: 500;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.custom-authenticator .amplify-button[data-variation='primary'] span {
+  color: #FFFFFF !important;
+  opacity: 0 !important;
+}
+
+.custom-authenticator .amplify-button[data-variation='primary']:hover {
+  background-color: #3367D6 !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4) !important;
+}
+
+.custom-authenticator .amplify-authenticator__auth-field-action {
+  color: #4285F4 !important;
+  margin-top: 8px !important;
+  display: inline-block !important;
+}
+
+/* Additional overrides for light background */
+.custom-authenticator [data-amplify-router] {
+  background-color: #FFFFFF !important;
+}
+
+/* Force all elements to have white background */
+.custom-authenticator [data-amplify-authenticator] * {
+  background-color: #FFFFFF !important;
+}
+
+/* Exception for the button */
+.custom-authenticator .amplify-button[data-variation='primary'] {
+  background-color: #4285F4 !important;
+}
+
+/* Exception for the button content */
+.custom-authenticator .amplify-button[data-variation='primary'] * {
+  background-color: transparent !important;
+}

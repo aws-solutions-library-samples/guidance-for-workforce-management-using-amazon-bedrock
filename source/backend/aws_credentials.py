@@ -175,7 +175,9 @@ def get_aws_credentials(service_account_name, namespace):
                             api_url = f"https://kubernetes.default.svc/api/v1/namespaces/{namespace}/serviceaccounts/{service_account_name}"
                             headers = {"Authorization": f"Bearer {token}"}
                             
-                            response = requests.get(api_url, headers=headers, verify=False)
+                            # Use the CA certificate bundle provided by Kubernetes
+                            ca_cert_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+                            response = requests.get(api_url, headers=headers, verify=ca_cert_path, timeout=10)
                             if response.status_code == 200:
                                 sa_data = response.json()
                                 annotations = sa_data.get('metadata', {}).get('annotations', {})

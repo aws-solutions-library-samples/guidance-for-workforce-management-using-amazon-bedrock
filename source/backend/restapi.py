@@ -1003,15 +1003,6 @@ class LocalBedrockService:
             self.additional_model_fields = {}
 
 
-    # Helper function to generate a random session ID
-    def generate_web_session_id(self, length=16):
-        timestamp = str(int(time.time()))
-        # Create a deterministic hash using timestamp
-        hash_input = f"{timestamp}_{self.model_id}"
-        hash_object = hashlib.md5(hash_input.encode())
-        # Take first 'length' characters of the hexadecimal hash
-        return hash_object.hexdigest()[:length]
-
     def _apply_rate_limiting(self):
         """Apply rate limiting to prevent overwhelming the API"""
         current_time = time.time()

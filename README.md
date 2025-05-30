@@ -64,14 +64,6 @@ We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/la
 
 The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month.
 
-# AWS Infrastructure Cost Analysis from Pricing Calculator
-
-This analysis presents the AWS infrastructure components and their associated monthly costs based on the provided AWS Pricing Calculator estimate from May 28, 2025. The estimate encompasses a comprehensive cloud architecture with container orchestration, compute resources, storage solutions, security services, and AI capabilities, totaling various services across the US East (N. Virginia) region.
-
-## Infrastructure Cost Breakdown
-
-The following table details each AWS service included in the cost estimate, along with their specific configuration parameters and monthly pricing:
-
 | AWS Service | Dimensions | Cost [USD] |
 |-------------|------------|---------------------|
 | Amazon EKS | Number of hybrid nodes (per month), Number of EKS Clusters (1) | 73.00 |

@@ -94,48 +94,68 @@ const Assistant: React.FC = () => {
   // Helper function to extract content from HTML wrapper and render safely
   const extractAndRenderContent = useCallback((htmlString: string) => {
     try {
-      // Create a temporary element to parse the HTML
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = htmlString;
+      // Use DOMParser instead of innerHTML for safer parsing
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlString, 'text/html');
       
-      // Extract the content from the div (removing the wrapper)
-      const contentElement = tempDiv.firstElementChild as HTMLElement;
+      // Get the first element from the body (since DOMParser creates a full document)
+      const contentElement = doc.body.firstElementChild as HTMLElement;
       if (contentElement) {
-        // Get the inner content (could be markdown, HTML, or plain text)
-        const innerContent = contentElement.innerHTML;
+        // Get the text content safely without executing any scripts
+        const textContent = contentElement.textContent || '';
         
-        // Check if content contains markdown table syntax
-        const hasMarkdownTable = /\|.*\|/.test(innerContent);
+        // Check if the original content contains markdown table syntax
+        const hasMarkdownTable = /\|.*\|/.test(textContent);
         
         if (hasMarkdownTable) {
-          // If it contains markdown tables, decode HTML entities and return as is
-          const decodedContent = innerContent
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&amp;/g, '&')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'");
-          return decodedContent;
+          // For markdown tables, we need to preserve the structure
+          // Get all text nodes and reconstruct the content
+          const walker = doc.createTreeWalker(
+            contentElement,
+            NodeFilter.SHOW_TEXT
+          );
+          
+          let markdownContent = '';
+          let node;
+          while (node = walker.nextNode()) {
+            markdownContent += node.textContent;
+          }
+          
+          return markdownContent;
         }
         
-        // Check if content looks like HTML (contains HTML tags) but not markdown
-        const hasHtmlTags = /<[^>]+>/.test(innerContent) && !hasMarkdownTable;
+        // Check if the original HTML string contains HTML tags (but content is now text)
+        const originalHasHtmlTags = /<[^>]+>/.test(htmlString) && !hasMarkdownTable;
         
-        if (hasHtmlTags) {
-          // If it contains HTML tags (but not markdown), strip tags
-          const textContent = innerContent.replace(/<[^>]*>/g, '');
+        if (originalHasHtmlTags) {
+          // Return the text content (HTML tags are already stripped by textContent)
           return textContent;
         } else {
-          // If it's plain text or markdown, return as is
-          return innerContent;
+          // If it's plain text or markdown, return the text content
+          return textContent;
         }
       }
       
-      // Fallback: return the original string if parsing fails
-      return htmlString;
+      // Fallback: try to extract text content from the entire parsed document
+      const bodyTextContent = doc.body.textContent || '';
+      if (bodyTextContent.trim()) {
+        return bodyTextContent;
+      }
+      
+      // Final fallback: return original string if it doesn't contain HTML tags
+      if (!/<[^>]+>/.test(htmlString)) {
+        return htmlString;
+      }
+      
+      // If all else fails, return empty string for safety
+      return '';
     } catch (error) {
       console.warn('Error parsing message content:', error);
-      return htmlString;
+      // Only return original string if it doesn't contain HTML tags
+      if (!/<[^>]+>/.test(htmlString)) {
+        return htmlString;
+      }
+      return '';
     }
   }, []);
 

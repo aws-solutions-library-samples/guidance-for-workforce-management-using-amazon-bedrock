@@ -83,15 +83,21 @@ DEFAULT_AWS_REFRESH_INTERVAL = 14400
 aws_refresh_thread = None
 restart_in_progress = False
 
+def no_op_callback():
+    """No-op callback for testing credential refresh without server restart"""
+    logger.info("AWS credentials refreshed successfully - no server restart needed")
+    return True
+
 def run_aws_credentials_refresh():
     """Run the AWS credentials refresh in a separate thread"""
-    # Get the refresh interval from environment variables, default to 15 minutes
+    # Get the refresh interval from environment variables
     refresh_interval = int(os.getenv("AWS_REFRESH_INTERVAL", DEFAULT_AWS_REFRESH_INTERVAL))
     logger.info(f"Starting AWS credentials refresh with interval of {refresh_interval} seconds")
     
-    # Register the callback for when credentials are refreshed
-    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = restart_servers
-    logger.info("Registered credentials refresh callback")
+    # Register a no-op callback instead of restart_servers for testing
+    # aws_credentials.refresh_aws_credentials.on_credentials_refreshed = restart_servers
+    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
+    logger.info("Registered no-op credentials refresh callback (server restart disabled for testing)")
     
     # Initial refresh - but don't restart servers yet since they haven't been started
     original_callback = aws_credentials.refresh_aws_credentials.on_credentials_refreshed
@@ -113,13 +119,13 @@ def run_aws_credentials_refresh():
                 
                 if not hasattr(aws_credentials.refresh_aws_credentials, 'on_credentials_refreshed') or aws_credentials.refresh_aws_credentials.on_credentials_refreshed is None:
                     logger.warning("Credentials refresh callback is not set, setting it now")
-                    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = restart_servers
+                    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
                 
                 success = aws_credentials.refresh_aws_credentials()
                 
                 if success:
                     consecutive_failures = 0
-                    logger.info(f"AWS credentials refresh #{refresh_count} succeeded")
+                    logger.info(f"AWS credentials refresh #{refresh_count} succeeded - environment variables updated")
                     
                     if refresh_count > 1 and refresh_count % 5 == 0:
                         try:
@@ -155,18 +161,18 @@ def run_aws_credentials_refresh():
     logger.info(f"AWS credentials refresh thread started with ID: {thread.ident}")
     return thread
 
-def restart_servers():
-    """Restart the unified server"""
-    global restart_in_progress
+# def restart_servers():
+#     """Restart the unified server - DISABLED FOR TESTING"""
+#     global restart_in_progress
     
-    logger.info("Restarting server due to AWS credentials refresh")
-    restart_in_progress = True
+#     logger.info("Server restart called but DISABLED for testing credential refresh without restart")
+#     restart_in_progress = True
     
-    # Add a small delay to ensure everything is ready
-    time.sleep(2)
+#     # Add a small delay to ensure everything is ready
+#     time.sleep(2)
     
-    restart_in_progress = False
-    return True
+#     restart_in_progress = False
+#     return True
 
 def extract_websocket_params(websocket: WebSocket) -> dict:
     """

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { AuthUser } from '@aws-amplify/auth';
-import { Auth } from 'aws-amplify';
+import { getCurrentUser, fetchAuthSession } from 'aws-amplify/auth';
 
 interface AuthContextType {
   user: AuthUser | undefined;
@@ -41,32 +41,55 @@ export const AuthProvider: React.FC<{
 
   useEffect(() => {
     if (user) {
-      const username = user.attributes?.email || user.username;
-      setUserId(username);
-      localStorage.setItem('currentUserId', username);
-      localStorage.setItem('sessionId', sessionId);
-      
       const getAuthDetails = async () => {
         try {
-          const session = await Auth.currentSession();
+          const session = await fetchAuthSession();
           if (!session) {
             throw new Error('No valid session found');
           }
           
-          const token = session.getIdToken().getJwtToken();
-          setIdToken(token);
+          const token = session.tokens?.idToken?.toString();
+          if (token) {
+            setIdToken(token);
+            
+            // Parse the JWT token to extract the username/email
+            try {
+              // Decode JWT payload (second part of the token)
+              const payload = JSON.parse(atob(token.split('.')[1]));
+              console.log('[AuthContext] JWT payload:', payload);
+              
+              // Try to get the username from various sources in order of preference
+              let extractedUsername = 
+                payload.email ||                    // Email address
+                payload.preferred_username ||       // Preferred username
+                payload['cognito:username'] ||      // Cognito username
+                payload.username ||                 // Username claim
+                user.username ||                    // User object username
+                user.userId;                        // Fallback to userId
+              
+              console.log('[AuthContext] Extracted username:', extractedUsername);
+              setUserId(extractedUsername);
+              localStorage.setItem('currentUserId', extractedUsername);
+            } catch (jwtError) {
+              console.error('[AuthContext] Error parsing JWT token:', jwtError);
+              // Fallback to user object properties
+              const fallbackUsername = user.username || user.userId;
+              setUserId(fallbackUsername);
+              localStorage.setItem('currentUserId', fallbackUsername);
+            }
+          }
+
+          localStorage.setItem('sessionId', sessionId);
 
           // Only fetch credentials if we have a valid authenticated session
-          if (session.isValid()) {
+          if (session.tokens && session.credentials) {
             try {
-              // Ensure we're using the authenticated credentials
-              const currentCredentials = await Auth.currentUserCredentials();
-              // console.log('currentCredentials', currentCredentials);
-              if (currentCredentials && !currentCredentials.isGuest) {
+              const creds = session.credentials;
+              if (creds && creds.accessKeyId) {
                 setCredentials({
-                  accessKeyId: currentCredentials.accessKeyId,
-                  secretAccessKey: currentCredentials.secretAccessKey,
-                  sessionToken: currentCredentials.sessionToken,
+                  accessKeyId: creds.accessKeyId,
+                  secretAccessKey: creds.secretAccessKey,
+                  sessionToken: creds.sessionToken || '',
                 });
               }
             } catch (credError) {
@@ -78,6 +101,12 @@ export const AuthProvider: React.FC<{
           console.error('Error getting session:', error);
           setIdToken(null);
           setCredentials(null);
+          
+          // Fallback to user object properties if session fetch fails
+          const fallbackUsername = user.username || user.userId;
+          setUserId(fallbackUsername);
+          localStorage.setItem('currentUserId', fallbackUsername);
+          localStorage.setItem('sessionId', sessionId);
         } finally {
           setIsReady(true);
         }

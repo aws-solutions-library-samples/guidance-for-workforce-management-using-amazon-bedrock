@@ -124,8 +124,8 @@ const MobileSearchInput: React.FC<MobileSearchInputProps> = ({
   
   // Refs
   const inputRef = useRef<HTMLInputElement>(null);
-  const micTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const micTimeoutRef = useRef<number | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
   const audioVisualizerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   

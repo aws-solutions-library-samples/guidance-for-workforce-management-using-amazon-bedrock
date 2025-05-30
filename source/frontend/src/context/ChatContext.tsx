@@ -17,6 +17,13 @@ import AudioPlayer from "./AudioPlayer.js";
 const SAMPLE_RATE = 16000;
 const CHANNELS = 1;
 
+// Security helper function to escape HTML content
+const escapeHtml = (text: string): string => {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+};
+
 // -----------------
 // Type Definitions
 // -----------------
@@ -88,8 +95,8 @@ const ChatContext = createContext<ChatContextType | undefined>(undefined);
 export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Element => {
   // WebSocket Integration
   const socketRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const connectionTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<number>();
+  const connectionTimeoutRef = useRef<number>();
   const reconnectAttemptsRef = useRef(0);
   const messageHandlersRef = useRef<Set<(event: MessageEvent) => void>>(new Set());
   const isConnectedRef = useRef(false);
@@ -135,14 +142,6 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
 
   // Global array to store all text content for duplicate detection
   const textContentRef = useRef<string[]>([]);
-
-  // Helper function to extract content from a message HTML string
-  const extractMessageContent = useCallback((messageHtml: string): string => {
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = messageHtml;
-    const messageElement = tempDiv.firstElementChild as HTMLElement;
-    return messageElement ? messageElement.innerHTML : '';
-  }, []);
 
   // Get a prompt UUID and replenish the pool if needed
   const getPromptUUID = useCallback(() => {
@@ -460,14 +459,17 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
               if (lastRole === role) {
                 console.log(`[Messages][S2S] Appending to existing ${role} message`);
                 
-                // Extract existing content
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = lastMessage;
-                const messageElement = tempDiv.firstElementChild as HTMLElement;
-                const existingContent = messageElement ? messageElement.innerHTML : '';
+                // Extract existing text content safely using DOMParser
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(lastMessage, 'text/html');
+                const messageElement = doc.body.firstElementChild as HTMLElement;
+                
+                // Get existing text content safely
+                const existingContent = messageElement ? messageElement.textContent || '' : '';
                 
                 // Create updated message with appended content
-                const updatedMessage = `<div data-message-role="${role}" data-content-id="${textContentId}" data-timestamp="${timestamp}" data-generation-stage="final">${existingContent}${textEvent.content}</div>`;
+                // Escape the content to prevent XSS attacks
+                const updatedMessage = `<div data-message-role="${role}" data-content-id="${textContentId}" data-timestamp="${timestamp}" data-generation-stage="final">${escapeHtml(existingContent + textEvent.content)}</div>`;
                 
                 // Replace the last message with the updated one
                 const newStream = [...stream];
@@ -480,9 +482,11 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
             
             // Different role or no previous messages - create new message
             console.log(`[Messages][S2S] Creating new ${role} message`);
-            const newMessage = `<div data-message-role="${role}" data-content-id="${textContentId}" data-timestamp="${timestamp}" data-generation-stage="final">${textEvent.content}</div>`;
             
-            return [...stream, newMessage];
+            // Escape the content to prevent XSS attacks
+            const updatedMessage = `<div data-message-role="${role}" data-content-id="${textContentId}" data-timestamp="${timestamp}" data-generation-stage="final">${escapeHtml(textEvent.content)}</div>`;
+            
+            return [...stream, updatedMessage];
           });
           
           break;
@@ -987,7 +991,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
 
       // Variables for user speech detection
       let userIsSpeaking = false;
-      let silenceTimer: NodeJS.Timeout | null = null;
+      let silenceTimer: number | null = null;
       let speakingStarted = false;
       const SILENCE_THRESHOLD = 0.01;
       const SPEECH_THRESHOLD = 0.015;

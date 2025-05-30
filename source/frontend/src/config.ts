@@ -1,4 +1,4 @@
-import { Auth } from 'aws-amplify';
+import { fetchAuthSession } from 'aws-amplify/auth';
 import axios from 'axios';
 
 
@@ -60,9 +60,11 @@ const axiosInstance = axios.create({
 // Add request interceptor for auth
 axiosInstance.interceptors.request.use(async (config) => {
   try {
-    const session = await Auth.currentSession();
-    const token = session.getIdToken().getJwtToken();
-    config.headers.Authorization = `Bearer ${token}`;
+    const session = await fetchAuthSession();
+    const token = session.tokens?.idToken?.toString();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
   } catch (error) {
     console.error('Error setting auth header:', error);
   }
@@ -152,16 +154,19 @@ export const WEBSOCKET_URL = import.meta.env.VITE_WEBSOCKET_URL || 'ws://localho
 export const getAuthConfig = () => {
   return {
     Auth: {
-      region: import.meta.env.VITE_AWS_REGION,
-      userPoolId: import.meta.env.VITE_USER_POOL_ID,
-      userPoolWebClientId: import.meta.env.VITE_USER_POOL_CLIENT_ID,
-      identityPoolId: import.meta.env.VITE_IDENTITY_POOL_ID,
-      oauth: {
-        domain: `${import.meta.env.VITE_USER_POOL_DOMAIN}.auth.${import.meta.env.VITE_AWS_REGION}.amazoncognito.com`,
-        scope: ['email', 'openid', 'profile'],
-        redirectSignIn: import.meta.env.VITE_REDIRECT_SIGN_IN,
-        redirectSignOut: import.meta.env.VITE_REDIRECT_SIGN_OUT,
-        responseType: 'code'
+      Cognito: {
+        userPoolId: import.meta.env.VITE_USER_POOL_ID,
+        userPoolClientId: import.meta.env.VITE_USER_POOL_CLIENT_ID,
+        identityPoolId: import.meta.env.VITE_IDENTITY_POOL_ID,
+        loginWith: {
+          oauth: {
+            domain: `${import.meta.env.VITE_USER_POOL_DOMAIN}.auth.${import.meta.env.VITE_AWS_REGION}.amazoncognito.com`,
+            scopes: ['email', 'openid', 'profile'],
+            redirectSignIn: [import.meta.env.VITE_REDIRECT_SIGN_IN],
+            redirectSignOut: [import.meta.env.VITE_REDIRECT_SIGN_OUT],
+            responseType: 'code'
+          }
+        }
       }
     }
   };

@@ -44,7 +44,7 @@ The application is deployed on AWS using the following services:
 - **Amazon OpenSearch**: Vector Store for standard operating procedure document
 
 
-[Solution Architecture](assets/images/architecture.png)
+![Solution Architecture](assets/images/architecture.png)
 
 The architecture is organized into several logical stacks:
 
@@ -258,31 +258,31 @@ The outputs are stored in the ./tests/responses directory.
 1. Access the web application in a browser through the URL/domain name that you have assigned.
 
 * Home screen - Daily task assignments for retail staff: 
-    * As store manager start creating new tasks assignments by clicking the “create daily tasks recommendation” button. 
+    * As store manager start creating new tasks assignments by clicking the "create daily tasks recommendation" button. 
     
-    [Home Screen](assets/images/1_HomeScreen.png)
+    ![Home Screen](assets/images/1_HomeScreen.png)
 
     The LLM checks available staff and analyzes the tasks that have to be completed for the given day and creates a list of task assignments for the store manager to review. Once the store manager reviewed the tasks assignments, you can approve them. 
     
-    [Task Approval Screen](assets/images/2_CreatingTasks.png)
+    ![Task Approval Screen](assets/images/2_CreatingTasks.png)
 
     Then the LLM goes through the list of recommended task assignments and creates the tasks for the respective users accordingly. This not only streamlines the work for the store manager, but also ensures that store associates work on the prioritized tasks accordingly.
 
 * Analytics screen - Store Analytics: 
     * As store manager review the store KPIs and inventory levels. Based on this data, the LLM generates recommendations. Once the store manager reviewed the recommended actions, they can have the LLM create and assign tasks to the available staff accordingly.
 
-    [Analytics Screen](assets/images/4_Analytics.png)
+    ![Analytics Screen](assets/images/4_Analytics.png)
 
 * Tasks screen - Questions & answers grounded in SOP of the store:
-    * As store associate get an overview of your assigned tasks. Click on a task to get further details or mark the task as complete. In addition, new store associates can click on the “SOP search” button for any given task to get even more detailed instructions that are grounded in the standard operating procedures of the store. This is enabled through a RAG system that takes the task details as input and searches the SOP document to provide additional guidance. Further, this solution enables store associates to ask any question via text or voice, and get answers that are grounded in the SOP of the store.
+    * As store associate get an overview of your assigned tasks. Click on a task to get further details or mark the task as complete. In addition, new store associates can click on the "SOP search" button for any given task to get even more detailed instructions that are grounded in the standard operating procedures of the store. This is enabled through a RAG system that takes the task details as input and searches the SOP document to provide additional guidance. Further, this solution enables store associates to ask any question via text or voice, and get answers that are grounded in the SOP of the store.
 
-    [Task Screen](assets/images/3_Tasks.png)
+    ![Task Screen](assets/images/3_Tasks.png)
 
 * Assistant screen - Personalized customer interactions: 
     * Store associates can lookup product or customer information either via text or speech, which not only enables store associates to provide personalized product recommendations to customers, but also simplifies how store associates can leverage the information that is typically stored in dozens of siloed applications.
     * Store associates can also lookup their schedule and time-off balance. In addition they can submit time-off requests without having to switch between multiple applications.
 
-    [Assistant Screen](assets/images/5_Assistant.png)
+    ![Assistant Screen](assets/images/5_Assistant.png)
 
 
 ## Next Steps
@@ -307,7 +307,7 @@ Note: This will delete all resources including the EKS cluster, ECR repositories
 
 ## Disclaimer
 
-Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided “as is” without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers.
+Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided "as is" without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers.
 
 
 ## Authors

@@ -114,7 +114,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 ### Operating System
 
-This sample code will deploy on Linux (Amazon Linux 2). To run locally, you will need to install and run Python on your local operating system, so Linux, Windows, and MacOS are acceptable.
+This solution deploys to AWS using Amazon Linux 2. For local development and testing, you can use any operating system (Linux, Windows, or MacOS) as long as Python and Docker is installed.
 
 
 ### Third-party tools
@@ -124,7 +124,9 @@ This deployment requires a Docker environment in the environment from which you 
 
 ### AWS account requirements
 
-This deployment requires you have public ACM certificate and DNS record available in your AWS account.
+Before deploying this solution, you must have the following set up in your AWS account:
+- A public SSL/TLS certificate from AWS Certificate Manager (ACM)
+- A DNS domain or subdomain configured in Route 53 or your DNS provider
 
 
 ### aws cdk bootstrap
@@ -135,7 +137,7 @@ If you are using AWS CDK for first time, please refer to this [documentation](ht
 
 ### Supported Regions
 
-Currently the speech-to-speech model Amazon Nova Sonic is only available in us-east-1. Therefore this guidance currently supports this region.
+This solution must be deployed in the US East 1 (N. Virginia) region because the Amazon Nova Sonic speech-to-speech model is only available there.
 
 
 ## Deployment Steps
@@ -158,14 +160,15 @@ Then, create a `.env` file in the deployment directory with the following variab
 
 ```
 
-# This email will be used to create the initial store manager user in the system
-EMAIL=your-email@example.com
-
-PARENT_DOMAIN_NAME=XXX.dev
-DOMAIN_NAME=retail.XXX.dev
-# wildcard certificate for sub-domain e.g. *.retail.huthmac.people.amazon.dev for the backend
+# email for the initial store manager user in the system
+EMAIL=your-email@anycompany.com
+# parent domain (if used with sub-domain)
+PARENT_DOMAIN_NAME=anycompany.dev
+# domain of the wbesite
+DOMAIN_NAME=retail.anycompany.dev
+# wildcard certificate for sub-domain e.g. *.retail.anycompany.dev for the backend
 CERTIFICATE_ARN='XXX'
-# certificate for domain e.g. retail.huthmac.people.amazon.dev
+# certificate for domain e.g. retail.anycompany.dev
 WEB_CERTIFICATE_ARN='XXX'
 
 # AWS Configuration
@@ -194,7 +197,7 @@ WEBSITE_BUCKET_NAME=website-storage
 You can use the provided `.env.example` file as a template.
 
 
-Update the EMAIL, PARENT_DOMAIN_NAME, DOMAIN_NAME, CERTIFICATE_ARN, WEB_CERTIFICATE_ARN with respective values for your environment, keep the other variables as placeholders as-is.
+Update the EMAIL, PARENT_DOMAIN_NAME, DOMAIN_NAME, CERTIFICATE_ARN, WEB_CERTIFICATE_ARN with respective values for your environment, keep the other variables as-is.
 
 ### 3. Run the Deployment Script
 

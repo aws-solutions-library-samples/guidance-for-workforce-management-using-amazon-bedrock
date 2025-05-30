@@ -253,7 +253,7 @@ The outputs are stored in the ./tests/responses directory.
 
 1. Access the web application in a browser through the URL/domain name that you have assigned.
 
-* Home screen - Daily task assignments for retail staff: 
+2. Home screen - Daily task assignments for retail staff: 
     * As store manager start creating new tasks assignments by clicking the "create daily tasks recommendation" button. 
     
     ![Home Screen](assets/images/1_HomeScreen.png)
@@ -264,17 +264,17 @@ The outputs are stored in the ./tests/responses directory.
 
     Then the LLM goes through the list of recommended task assignments and creates the tasks for the respective users accordingly. This not only streamlines the work for the store manager, but also ensures that store associates work on the prioritized tasks accordingly.
 
-* Analytics screen - Store Analytics: 
+3. Analytics screen - Store Analytics: 
     * As store manager review the store KPIs and inventory levels. Based on this data, the LLM generates recommendations. Once the store manager reviewed the recommended actions, they can have the LLM create and assign tasks to the available staff accordingly.
 
     ![Analytics Screen](assets/images/4_Analytics.png)
 
-* Tasks screen - Questions & answers grounded in SOP of the store:
+4. Tasks screen - Questions & answers grounded in SOP of the store:
     * As store associate get an overview of your assigned tasks. Click on a task to get further details or mark the task as complete. In addition, new store associates can click on the "SOP search" button for any given task to get even more detailed instructions that are grounded in the standard operating procedures of the store. This is enabled through a RAG system that takes the task details as input and searches the SOP document to provide additional guidance. Further, this solution enables store associates to ask any question via text or voice, and get answers that are grounded in the SOP of the store.
 
     ![Task Screen](assets/images/3_Tasks.png)
 
-* Assistant screen - Personalized customer interactions: 
+5. Assistant screen - Personalized customer interactions: 
     * Store associates can lookup product or customer information either via text or speech, which not only enables store associates to provide personalized product recommendations to customers, but also simplifies how store associates can leverage the information that is typically stored in dozens of siloed applications.
     * Store associates can also lookup their schedule and time-off balance. In addition they can submit time-off requests without having to switch between multiple applications.
 

@@ -1,323 +1,153 @@
-/* Direct overrides for AWS Amplify UI dark theme */
+/* Modern AWS Amplify UI v6 CSS Override */
 
-/* Force white background on all elements */
+/* Force light theme using CSS variables at the root level */
+[data-amplify-authenticator] {
+  /* Background colors */
+  --amplify-colors-background-primary: #FFFFFF !important;
+  --amplify-colors-background-secondary: #F5F5F5 !important;
+  --amplify-colors-background-tertiary: #FFFFFF !important;
+  
+  /* Font colors */
+  --amplify-colors-font-primary: #000000 !important;
+  --amplify-colors-font-secondary: #666666 !important;
+  --amplify-colors-font-interactive: #4285F4 !important;
+  
+  /* Button colors */
+  --amplify-components-button-primary-background-color: #4285F4 !important;
+  --amplify-components-button-primary-color: #FFFFFF !important;
+  --amplify-components-button-primary-hover-background-color: #3367D6 !important;
+  --amplify-components-button-primary-focus-background-color: #2A56C6 !important;
+  
+  /* Field colors */
+  --amplify-components-field-label-color: #000000 !important;
+  --amplify-components-fieldcontrol-background-color: #FFFFFF !important;
+  --amplify-components-fieldcontrol-color: #000000 !important;
+  --amplify-components-fieldcontrol-border-color: #E0E0E0 !important;
+  
+  /* Border colors */
+  --amplify-colors-border-primary: #E0E0E0 !important;
+  --amplify-colors-border-secondary: #E0E0E0 !important;
+  --amplify-colors-border-focus: #4285F4 !important;
+  
+  /* Override any dark theme backgrounds */
+  background-color: #FFFFFF !important;
+}
+
+/* Ensure all child elements inherit the light background */
+[data-amplify-authenticator] * {
+  background-color: inherit !important;
+}
+
+/* Specific overrides for core components */
 .amplify-authenticator {
   background-color: #FFFFFF !important;
 }
 
-.amplify-authenticator * {
+/* Router container */
+.amplify-authenticator [data-amplify-router] {
   background-color: #FFFFFF !important;
 }
 
-/* Exceptions for the primary button */
-.amplify-button[data-variation='primary'] {
-  background-color: #4285F4 !important;
-}
-
-.amplify-button[data-variation='primary'] * {
-  background-color: transparent !important;
-  color: #FFFFFF !important;
-}
-
-/* Target the specific elements in the form */
-[data-amplify-authenticator] {
-  background-color: #FFFFFF !important;
-}
-
-[data-amplify-router] {
-  background-color: #FFFFFF !important;
-}
-
-[data-amplify-container] {
-  background-color: #FFFFFF !important;
-}
-
-[data-amplify-form] {
-  background-color: #FFFFFF !important;
-}
-
-[data-amplify-authenticator-signin] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the form fields */
-.amplify-field {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-field * {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-field__label {
-  color: #000000 !important;
-  background-color: #FFFFFF !important;
-}
-
-.amplify-field-group__control {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-input {
-  background-color: #FFFFFF !important;
-  color: #000000 !important;
-}
-
-/* Target the username and password fields specifically */
-[data-amplify-username-label],
-[data-amplify-password-label] {
-  color: #000000 !important;
-  background-color: #FFFFFF !important;
-}
-
-[data-amplify-username],
-[data-amplify-password] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the footer */
-[data-amplify-footer] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the forgot password link */
-[data-amplify-footer] a {
-  color: #4285F4 !important;
-  background-color: #FFFFFF !important;
-}
-
-/* Target the sign in button */
-.amplify-button[data-variation='primary'] {
-  background-color: #4285F4 !important;
-  color: #FFFFFF !important;
-}
-
-/* Target the sign in button text */
-.amplify-button[data-variation='primary'] span {
-  color: #FFFFFF !important;
-  background-color: transparent !important;
-}
-
-/* Target the loading spinner */
-.amplify-button[data-loading="true"] .amplify-loading-spinner {
-  background-color: transparent !important;
-}
-
-/* Target the loading text */
-.amplify-button[data-loading="true"] .amplify-loading-content {
-  background-color: transparent !important;
-}
-
-/* Target the background of the modal */
-[data-amplify-authenticator][data-variation="modal"] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the router content */
-[data-amplify-router-content] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the main container that has the black background */
-.amplify-authenticator [data-amplify-container] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the form container */
+/* Form container */
 .amplify-authenticator [data-amplify-form] {
   background-color: #FFFFFF !important;
 }
 
-/* Target the sign in container */
-.amplify-authenticator [data-amplify-authenticator-signin] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the router */
-.amplify-authenticator [data-amplify-router] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the router content */
-.amplify-authenticator [data-amplify-router-content] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the form section */
-.amplify-authenticator [data-amplify-form-section] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the form field */
-.amplify-authenticator [data-amplify-form-field] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the username and password labels */
-.amplify-authenticator [data-amplify-username-label],
-.amplify-authenticator [data-amplify-password-label] {
-  background-color: #FFFFFF !important;
+/* Field labels */
+.amplify-field__label {
   color: #000000 !important;
-}
-
-/* Target the username and password fields */
-.amplify-authenticator [data-amplify-username],
-.amplify-authenticator [data-amplify-password] {
   background-color: #FFFFFF !important;
 }
 
-/* Target the username and password fields */
-.amplify-authenticator [data-amplify-username] *,
-.amplify-authenticator [data-amplify-password] * {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the footer */
-.amplify-authenticator [data-amplify-footer] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the footer */
-.amplify-authenticator [data-amplify-footer] * {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the button */
-.amplify-authenticator [data-amplify-button] {
-  background-color: #4285F4 !important;
-  color: #FFFFFF !important;
-}
-
-/* Target the button */
-.amplify-authenticator [data-amplify-button] * {
-  background-color: transparent !important;
-  color: #FFFFFF !important;
-}
-
-/* Target the main black background in the screenshot */
-.amplify-authenticator [data-amplify-router] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target all elements in the router */
-.amplify-authenticator [data-amplify-router] * {
-  background-color: #FFFFFF !important;
-}
-
-/* Exception for the primary button */
-.amplify-button[data-variation='primary'] {
-  background-color: #4285F4 !important;
-}
-
-.amplify-button[data-variation='primary'] * {
-  background-color: transparent !important;
-  color: #FFFFFF !important;
-}
-
-/* Target the specific black areas in the screenshot */
-.amplify-authenticator [data-amplify-form] > div {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-authenticator [data-amplify-form] > div > div {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the specific black areas in the input fields */
-.amplify-field {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-field * {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-field-group {
-  background-color: #FFFFFF !important;
-}
-
-.amplify-field-group * {
-  background-color: #FFFFFF !important;
-}
-
-/* Target the input fields */
+/* Input fields */
 .amplify-input {
   background-color: #FFFFFF !important;
   color: #000000 !important;
+  border-color: #E0E0E0 !important;
 }
 
-/* Target the input field container */
 .amplify-field-group__control {
   background-color: #FFFFFF !important;
+  border-color: #E0E0E0 !important;
 }
 
-/* Target the labels */
-.amplify-field__label {
+/* Primary buttons - using the new v6 class structure */
+.amplify-button--primary {
+  background-color: #4285F4 !important;
+  color: #FFFFFF !important;
+  border-color: #4285F4 !important;
+}
+
+.amplify-button--primary:hover {
+  background-color: #3367D6 !important;
+  border-color: #3367D6 !important;
+}
+
+.amplify-button--primary:focus {
+  background-color: #2A56C6 !important;
+  border-color: #2A56C6 !important;
+}
+
+.amplify-button--primary:active {
+  background-color: #2A56C6 !important;
+  border-color: #2A56C6 !important;
+}
+
+/* Default buttons */
+.amplify-button {
   background-color: #FFFFFF !important;
+  border-color: #E0E0E0 !important;
   color: #000000 !important;
 }
 
-/* Target the specific black areas in the screenshot */
-.amplify-authenticator [data-amplify-router] * {
+.amplify-button:not(.amplify-button--primary) {
+  background-color: #FFFFFF !important;
+  border-color: #E0E0E0 !important;
+  color: #000000 !important;
+}
+
+.amplify-button:not(.amplify-button--primary):hover {
+  background-color: #F5F5F5 !important;
+  border-color: #4285F4 !important;
+  color: #4285F4 !important;
+}
+
+/* Footer and links */
+[data-amplify-footer] {
   background-color: #FFFFFF !important;
 }
 
-/* Exception for the primary button */
-.amplify-button[data-variation='primary'] {
-  background-color: #4285F4 !important;
-}
-
-.amplify-button[data-variation='primary'] * {
+[data-amplify-footer] a {
+  color: #4285F4 !important;
   background-color: transparent !important;
-  color: #FFFFFF !important;
 }
 
-/* Target the main black background in the screenshot */
-body {
-  background-color: #FFFFFF !important;
+/* Loading states */
+.amplify-button[aria-disabled="true"],
+.amplify-button[disabled] {
+  background-color: #F5F5F5 !important;
+  color: #999999 !important;
+  border-color: #E0E0E0 !important;
 }
 
-/* Target the root element */
-#root {
-  background-color: #FFFFFF !important;
+/* Focus states */
+.amplify-input:focus,
+.amplify-field-group__control:focus {
+  border-color: #4285F4 !important;
+  box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2) !important;
 }
 
-/* Target the amplify authenticator */
-.amplify-authenticator {
-  background-color: #FFFFFF !important;
-}
-
-/* Target all elements in the authenticator */
-.amplify-authenticator * {
-  background-color: #FFFFFF !important;
-}
-
-/* Exception for the primary button */
-.amplify-authenticator .amplify-button[data-variation='primary'] {
-  background-color: #4285F4 !important;
-}
-
-.amplify-authenticator .amplify-button[data-variation='primary'] * {
+/* Override any remaining dark theme elements */
+.amplify-authenticator .amplify-heading,
+.amplify-authenticator .amplify-text {
+  color: #000000 !important;
   background-color: transparent !important;
-  color: #FFFFFF !important;
 }
 
-/* Target the main black background in the screenshot */
-.amplify-authenticator [data-amplify-router] {
-  background-color: #FFFFFF !important;
-}
-
-/* Target all elements in the router */
-.amplify-authenticator [data-amplify-router] * {
-  background-color: #FFFFFF !important;
-}
-
-/* Exception for the primary button */
-.amplify-authenticator .amplify-button[data-variation='primary'] {
-  background-color: #4285F4 !important;
-}
-
-.amplify-authenticator .amplify-button[data-variation='primary'] * {
-  background-color: transparent !important;
-  color: #FFFFFF !important;
+/* Mobile responsive adjustments */
+@media (max-width: 600px) {
+  .amplify-authenticator [data-amplify-router] {
+    box-shadow: none !important;
+    border: none !important;
+  }
 } 

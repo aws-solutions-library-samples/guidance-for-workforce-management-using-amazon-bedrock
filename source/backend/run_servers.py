@@ -34,6 +34,8 @@ import aws_credentials
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+# Configure uvicorn logging to suppress health check logs
+import uvicorn.logging
 from restapi import app as restapi_app
 import boto3
 import json
@@ -76,47 +78,60 @@ DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 DEFAULT_PORT = 8000
 DEFAULT_HOST = "0.0.0.0"
 
-# Default AWS credentials refresh interval in 4 hours (14400 seconds)
-DEFAULT_AWS_REFRESH_INTERVAL = 14400
+# Default AWS credentials refresh interval in 30 minutes (1800 seconds) - more proactive
+DEFAULT_AWS_REFRESH_INTERVAL = 1800
 
 # Global variables
-aws_refresh_thread = None
 restart_in_progress = False
 
 def no_op_callback():
     """No-op callback for testing credential refresh without server restart"""
-    logger.info("AWS credentials refreshed successfully - no server restart needed")
+    logger.info("🔄 AWS credentials refreshed successfully - callback executed")
+    logger.info("💡 Future enhancement: This is where active sessions would be notified to refresh their Bedrock clients")
+    
+    # Log current environment variables for verification
+    access_key = os.environ.get('AWS_ACCESS_KEY_ID', '')
+    session_token = os.environ.get('AWS_SESSION_TOKEN', '')
+    logger.info(f"✅ Environment verification - Access key: {access_key[:5]}..." if access_key else "❌ No access key found")
+    logger.info(f"✅ Session token: {'Present' if session_token else 'Missing'}")
+    
     return True
 
 def run_aws_credentials_refresh():
-    """Run the AWS credentials refresh in a separate thread"""
-    # Get the refresh interval from environment variables
+    """Set up AWS credentials refresh using asyncio scheduling"""
     refresh_interval = int(os.getenv("AWS_REFRESH_INTERVAL", DEFAULT_AWS_REFRESH_INTERVAL))
-    logger.info(f"Starting AWS credentials refresh with interval of {refresh_interval} seconds")
+    logger.info(f"Setting up AWS credentials refresh with interval of {refresh_interval} seconds")
     
-    # Register a no-op callback instead of restart_servers for testing
-    # aws_credentials.refresh_aws_credentials.on_credentials_refreshed = restart_servers
-    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
-    logger.info("Registered no-op credentials refresh callback (server restart disabled for testing)")
+    # Ensure the refresh function has the callback attribute
+    if not hasattr(aws_credentials.refresh_aws_credentials, 'on_credentials_refreshed'):
+        aws_credentials.refresh_aws_credentials.on_credentials_refreshed = None
     
-    # Initial refresh - but don't restart servers yet since they haven't been started
-    original_callback = aws_credentials.refresh_aws_credentials.on_credentials_refreshed
-    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = None
+    # Initial refresh - but don't call callback yet since servers haven't started
+    logger.info("Performing initial AWS credentials refresh (without callback)")
     initial_success = aws_credentials.refresh_aws_credentials()
-    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = original_callback
     logger.info(f"Initial AWS credentials refresh {'succeeded' if initial_success else 'failed'}")
     
-    def refresh_loop():
-        refresh_count = 0
-        consecutive_failures = 0
-        max_consecutive_failures = 3
-        
-        while True:
+    # NOW register the callback for future refreshes
+    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
+    logger.info("Registered no-op credentials refresh callback for future refreshes")
+    
+    # State for tracking refresh attempts
+    refresh_state = {
+        'count': 0,
+        'consecutive_failures': 0,
+        'max_consecutive_failures': 3,
+        'current_interval': refresh_interval
+    }
+    
+    async def schedule_refresh():
+        """Schedule the next credential refresh"""
+        def refresh_and_reschedule():
+            """Perform refresh and schedule next one"""
             try:
-                time.sleep(DEFAULT_AWS_REFRESH_INTERVAL)
-                refresh_count += 1
-                logger.info(f"Refreshing AWS credentials at {time.strftime('%Y-%m-%d %H:%M:%S')} (attempt #{refresh_count})")
+                refresh_state['count'] += 1
+                logger.info(f"Refreshing AWS credentials (attempt #{refresh_state['count']})")
                 
+                # Ensure callback is still set
                 if not hasattr(aws_credentials.refresh_aws_credentials, 'on_credentials_refreshed') or aws_credentials.refresh_aws_credentials.on_credentials_refreshed is None:
                     logger.warning("Credentials refresh callback is not set, setting it now")
                     aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
@@ -124,42 +139,53 @@ def run_aws_credentials_refresh():
                 success = aws_credentials.refresh_aws_credentials()
                 
                 if success:
-                    consecutive_failures = 0
-                    logger.info(f"AWS credentials refresh #{refresh_count} succeeded - environment variables updated")
+                    refresh_state['consecutive_failures'] = 0
+                    logger.info(f"AWS credentials refresh #{refresh_state['count']} succeeded")
                     
-                    if refresh_count > 1 and refresh_count % 5 == 0:
+                    # Periodic credential validation (every 5th refresh)
+                    if refresh_state['count'] > 1 and refresh_state['count'] % 5 == 0:
                         try:
-                            
                             sts = boto3.client('sts')
                             identity = sts.get_caller_identity()
                             logger.info(f"AWS credentials check: Valid (Identity: {identity.get('Arn', 'Unknown')})")
                             
-                            if consecutive_failures == 0 and refresh_count > 10:
-                                new_interval = min(refresh_interval * 1.5, 3600)
-                                if new_interval > refresh_interval:
-                                    refresh_interval = new_interval
-                                    logger.info(f"Increasing refresh interval to {refresh_interval} seconds")
+                            # Gradually increase interval for stable refreshes
+                            if refresh_state['consecutive_failures'] == 0 and refresh_state['count'] > 10:
+                                new_interval = min(refresh_state['current_interval'] * 1.1, 7200)  # Cap at 2 hours instead of 1 hour
+                                if new_interval > refresh_state['current_interval']:
+                                    refresh_state['current_interval'] = int(new_interval)
+                                    logger.info(f"Increasing refresh interval to {refresh_state['current_interval']} seconds")
                         except Exception as e:
                             logger.error(f"AWS credentials check failed: {e}")
                 else:
-                    consecutive_failures += 1
-                    logger.error(f"AWS credentials refresh #{refresh_count} failed ({consecutive_failures} consecutive failures)")
+                    refresh_state['consecutive_failures'] += 1
+                    logger.error(f"AWS credentials refresh #{refresh_state['count']} failed ({refresh_state['consecutive_failures']} consecutive failures)")
                     
-                    if consecutive_failures >= max_consecutive_failures:
-                        logger.error(f"Too many consecutive failures ({consecutive_failures}), attempting to restart refresh thread")
+                    # Reset interval on failures to try more frequently
+                    if refresh_state['consecutive_failures'] >= refresh_state['max_consecutive_failures']:
+                        logger.error(f"Too many consecutive failures ({refresh_state['consecutive_failures']}), resetting refresh interval")
+                        refresh_state['current_interval'] = refresh_interval  # Reset to original interval
+                
             except Exception as e:
-                logger.error(f"Exception in AWS credentials refresh loop: {e}")
+                logger.error(f"Exception in AWS credentials refresh: {e}")
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
-                consecutive_failures += 1
+                refresh_state['consecutive_failures'] += 1
+            
+            # Schedule next refresh
+            try:
+                loop = asyncio.get_event_loop()
+                loop.call_later(refresh_state['current_interval'], refresh_and_reschedule)
+                logger.debug(f"Next refresh scheduled in {refresh_state['current_interval']} seconds")
+            except Exception as e:
+                logger.error(f"Failed to schedule next refresh: {e}")
+        
+        # Schedule the first refresh
+        loop = asyncio.get_event_loop()
+        loop.call_later(refresh_interval, refresh_and_reschedule)
+        logger.info(f"AWS credentials refresh scheduled to start in {refresh_interval} seconds")
     
-    thread = threading.Thread(target=refresh_loop)
-    thread.daemon = True
-    thread.name = "aws-credentials-refresh"
-    thread.start()
-    
-    logger.info(f"AWS credentials refresh thread started with ID: {thread.ident}")
-    return thread
+    return schedule_refresh
 
 # def restart_servers():
 #     """Restart the unified server - DISABLED FOR TESTING"""
@@ -499,20 +525,14 @@ async def cleanup_session_managers():
 
 def main():
     """Main function to start the unified server"""
-    global aws_refresh_thread
-    
-    
-    # Start AWS credentials refresh
-    aws_refresh_thread = run_aws_credentials_refresh()
+    # Get the credentials refresh scheduler function
+    aws_refresh_scheduler = run_aws_credentials_refresh()
     
     # Get port and host from environment variables
     port = int(os.getenv("PORT", DEFAULT_PORT))
     host = os.getenv("HOST", DEFAULT_HOST)
     
     logger.info(f"Starting unified server on {host}:{port}")
-    
-    # Configure uvicorn logging to suppress health check logs
-    import uvicorn.logging
     
     class HealthCheckFilter(logging.Filter):
         def filter(self, record):
@@ -538,8 +558,13 @@ def main():
     # Add the cleanup task to the FastAPI startup
     @app.on_event("startup")
     async def startup_event():
+        # Start periodic session cleanup
         asyncio.create_task(periodic_cleanup())
         logger.info("Started periodic session cleanup task")
+        
+        # Start AWS credentials refresh scheduler
+        await aws_refresh_scheduler()
+        logger.info("AWS credentials refresh scheduler started")
     
     # Start the server
     uvicorn.run(app, host=host, port=port)

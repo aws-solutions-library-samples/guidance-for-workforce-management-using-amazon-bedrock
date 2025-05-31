@@ -97,7 +97,7 @@ The following environment variables can be configured:
 
 ### WebSocket Endpoints
 
-- `ws://<host>:8000` - WebSocket endpoint for speech-to-speech functionality
+- `/ws/{client_id}` - WebSocket endpoint for speech-to-speech functionality
 
 ## Health Checks
 

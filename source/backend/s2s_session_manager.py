@@ -11,6 +11,7 @@ from aws_sdk_bedrock_runtime.models import InvokeModelWithBidirectionalStreamInp
 from aws_sdk_bedrock_runtime.config import Config, HTTPAuthSchemeResolver, SigV4AuthScheme
 from smithy_aws_core.credentials_resolvers.environment import EnvironmentCredentialsResolver
 import logging
+import os
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -66,14 +67,27 @@ class S2sSessionManager:
 
     def _initialize_client(self):
         """Initialize the Bedrock client."""
+        # Clear any existing client first
+        self.bedrock_client = None
+        
+        # Force clear of any cached credentials in the environment resolver
+        # by creating a new resolver instance
+        credentials_resolver = EnvironmentCredentialsResolver()
+        
         config = Config(
             endpoint_uri=f"https://bedrock-runtime.{self.region}.amazonaws.com",
             region=self.region,
-            aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
+            aws_credentials_identity_resolver=credentials_resolver,
             http_auth_scheme_resolver=HTTPAuthSchemeResolver(),
             http_auth_schemes={"aws.auth#sigv4": SigV4AuthScheme()}
         )
         self.bedrock_client = BedrockRuntimeClient(config=config)
+        
+        # Log environment variables for debugging (without exposing secrets)
+        access_key = os.environ.get('AWS_ACCESS_KEY_ID', '')
+        logger.info(f"Bedrock client initialized with access key: {access_key[:5]}..." if access_key else "No access key found")
+        session_token = os.environ.get('AWS_SESSION_TOKEN', '')
+        logger.info(f"Session token present: {'Yes' if session_token else 'No'}")
 
     async def initialize_stream(self):
         """Initialize the bidirectional stream with Bedrock."""
@@ -197,12 +211,23 @@ class S2sSessionManager:
                     self.token_refresh_attempts += 1
                     self.last_token_refresh_time = current_time
                     
-                    if self._handle_expired_token():
-                        # Retry sending the event with incremented retry count
-                        await asyncio.sleep(1.0)  # Brief delay before retry
-                        await self.send_raw_event(event_data, retry_count + 1)
-                    else:
-                        logger.error(f"Failed to recover from {error_type} when sending event")
+                    try:
+                        # Import and refresh AWS credentials
+                        import aws_credentials
+                        aws_credentials.refresh_aws_credentials()
+                        
+                        if self._handle_expired_token():
+                            # For send_raw_event, we can't recreate the stream here as it would interfere with
+                            # the current session flow. Instead, just mark the session as needing restart
+                            logger.warning(f"Token refresh successful but stream needs recreation - marking session for restart")
+                            self.is_active = False  # This will trigger stream recreation in the main handler
+                            return  # Don't retry the event - let the session handler deal with it
+                        else:
+                            logger.error(f"Failed to recover from {error_type} when sending event")
+                            self.is_active = False
+                    except Exception as refresh_error:
+                        logger.error(f"Exception during token refresh in send_raw_event: {refresh_error}")
+                        self.is_active = False
                 else:
                     logger.error(f"Maximum token refresh attempts ({self.max_token_refresh_attempts}) exceeded for {error_type}, stopping event sending")
                     self.is_active = False  # Stop the session
@@ -279,15 +304,73 @@ class S2sSessionManager:
             logger.error(f"Error adding audio chunk to queue: {e}")
     
     def _handle_expired_token(self):
-        """Handle expired token by reinitializing the client with fresh credentials."""
-        logger.error("Detected expired token, reinitializing Bedrock client")
+        """Handle expired token by recreating the stream with fresh credentials."""
+        logger.error("Detected expired token, reinitializing Bedrock client and stream")
         try:
-            # Reinitialize the client with fresh credentials
+            # First, close the existing stream if it exists
+            if self.stream:
+                try:
+                    # Don't await here since this is a sync method - just mark inactive
+                    self.is_active = False
+                    logger.info("Marked existing stream as inactive")
+                except Exception as e:
+                    logger.warning(f"Error while marking stream inactive: {e}")
+            
+            # Clear the existing client to force recreation with fresh credentials
+            self.bedrock_client = None
+            
+            # Force recreation of the client with fresh environment variables
             self._initialize_client()
+            
             logger.info("Bedrock client reinitialized successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to reinitialize Bedrock client: {e}")
+            return False
+    
+    async def _recreate_stream_after_token_refresh(self):
+        """Recreate the entire stream after token refresh."""
+        try:
+            logger.info("Recreating stream after token refresh")
+            
+            # Cancel existing tasks
+            if self.response_task and not self.response_task.done():
+                self.response_task.cancel()
+                try:
+                    await self.response_task
+                except asyncio.CancelledError:
+                    pass
+            
+            if self.audio_task and not self.audio_task.done():
+                self.audio_task.cancel()
+                try:
+                    await self.audio_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Close existing stream
+            if self.stream:
+                try:
+                    await self.stream.input_stream.close()
+                except:
+                    pass  # Ignore errors when closing
+                self.stream = None
+            
+            # Clear queues
+            while not self.audio_input_queue.empty():
+                try:
+                    self.audio_input_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            
+            # Reinitialize everything
+            await self.initialize_stream()
+            logger.info("Stream successfully recreated after token refresh")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to recreate stream after token refresh: {e}")
+            self.is_active = False
             return False
 
     async def _process_responses(self):
@@ -412,15 +495,26 @@ class S2sSessionManager:
                             self.token_refresh_attempts += 1
                             self.last_token_refresh_time = current_time
                             
-                            # Import and refresh AWS credentials
-                            import aws_credentials
-                            aws_credentials.refresh_aws_credentials()
+                            try:
+                                # Import and refresh AWS credentials
+                                import aws_credentials
+                                aws_credentials.refresh_aws_credentials()
 
-                            if self._handle_expired_token():
-                                await asyncio.sleep(1.0)  # Brief delay before retrying
-                                continue
-                            else:
-                                logger.error(f"Failed to recover from {error_type}, stopping response processing")
+                                # Handle the expired token (reinitialize client)
+                                if self._handle_expired_token():
+                                    # Recreate the entire stream with fresh credentials
+                                    if await self._recreate_stream_after_token_refresh():
+                                        logger.info("Successfully recreated stream after token refresh")
+                                        # Break out of response processing - new stream will have new response task
+                                        break
+                                    else:
+                                        logger.error("Failed to recreate stream after token refresh")
+                                        break
+                                else:
+                                    logger.error(f"Failed to recover from {error_type}, stopping response processing")
+                                    break
+                            except Exception as refresh_error:
+                                logger.error(f"Exception during token refresh: {refresh_error}")
                                 break
                         else:
                             logger.error(f"Maximum token refresh attempts ({self.max_token_refresh_attempts}) exceeded for {error_type} in response processing, stopping")

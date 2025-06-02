@@ -83,6 +83,31 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 ## Prerequisites
 
+### AWS account requirements
+
+Before deploying this solution, you must have the following set up in your AWS account:
+- A public SSL/TLS certificate from AWS Certificate Manager (ACM)
+- A DNS domain or subdomain configured in Route 53 or your DNS provider
+
+
+### AWS CDK bootstrap
+
+This Guidance uses the AWS CDK to deploy resources in an AWS Account.
+If you are using AWS CDK for first time, please refer to this [documentation](https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping-env.html) for inststructions on how to prepare your AWS account for AWS CDK.
+
+
+### Operating System
+
+This solution deploys to AWS using Amazon Linux 2. For local development and testing, you can use any operating system (Linux, Windows, or MacOS) as long as Python and Docker is installed.
+
+
+### Third-party tools
+
+This deployment requires a Docker environment in the environment from which you want to deploy the application from.
+
+
+### System Requirements
+
 - Python 3.12+
 - Node.js 18+
 - AWS CLI configured with appropriate permissions
@@ -110,29 +135,6 @@ The following table provides a sample cost breakdown for deploying this Guidance
   * websockets==15.0.1
   * Pillow>=10.0.0
   * python-multipart
-
-
-### Operating System
-
-This solution deploys to AWS using Amazon Linux 2. For local development and testing, you can use any operating system (Linux, Windows, or MacOS) as long as Python and Docker is installed.
-
-
-### Third-party tools
-
-This deployment requires a Docker environment in the environment from which you want to deploy the application from.
-
-
-### AWS account requirements
-
-Before deploying this solution, you must have the following set up in your AWS account:
-- A public SSL/TLS certificate from AWS Certificate Manager (ACM)
-- A DNS domain or subdomain configured in Route 53 or your DNS provider
-
-
-### aws cdk bootstrap
-
-This Guidance uses the AWS CDK to deploy resources in an AWS Account.
-If you are using AWS CDK for first time, please refer to this [documentation](https://docs.aws.amazon.com/cdk/v2/guide/bootstrapping-env.html) for inststructions on how to prepare your AWS account for AWS CDK.
 
 
 ### Supported Regions

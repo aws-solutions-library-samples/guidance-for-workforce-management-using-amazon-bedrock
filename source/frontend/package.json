@@ -31,11 +31,6 @@
 	},
 	"dependencies": {
 		"@aws-amplify/ui-react": "^6.11.2",
-		"@aws-sdk/client-bedrock-agent-runtime": "^3.782",
-		"@aws-sdk/client-bedrock-runtime": "^3.785",
-		"@aws-sdk/credential-providers": "^3.782",
-		"@aws-sdk/types": "^3.696.0",
-		"@aws-sdk/util-utf8-node": "3.259.0",
 		"@emotion/react": "^11.13.3",
 		"@emotion/styled": "^11.13.0",
 		"@fontsource/roboto": "^5.0.13",

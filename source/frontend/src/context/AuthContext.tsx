@@ -9,11 +9,6 @@ interface AuthContextType {
   isAuthenticated: boolean;
   sessionId: string;
   idToken: string | null;
-  credentials: {
-    accessKeyId: string;
-    secretAccessKey: string;
-    sessionToken: string;
-  } | null;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -34,7 +29,6 @@ export const AuthProvider: React.FC<{
   const [userId, setUserId] = useState<string | null>(null);
   const [idToken, setIdToken] = useState<string | null>(null);
   const [isReady, setIsReady] = useState(false);
-  const [credentials, setCredentials] = useState<AuthContextType['credentials']>(null);
   const [sessionId] = useState(() => 
     localStorage.getItem('sessionId') || crypto.randomUUID()
   );
@@ -80,27 +74,9 @@ export const AuthProvider: React.FC<{
           }
 
           localStorage.setItem('sessionId', sessionId);
-
-          // Only fetch credentials if we have a valid authenticated session
-          if (session.tokens && session.credentials) {
-            try {
-              const creds = session.credentials;
-              if (creds && creds.accessKeyId) {
-                setCredentials({
-                  accessKeyId: creds.accessKeyId,
-                  secretAccessKey: creds.secretAccessKey,
-                  sessionToken: creds.sessionToken || '',
-                });
-              }
-            } catch (credError) {
-              console.warn('Unable to get AWS credentials:', credError);
-              setCredentials(null);
-            }
-          }
         } catch (error) {
           console.error('Error getting session:', error);
           setIdToken(null);
-          setCredentials(null);
           
           // Fallback to user object properties if session fetch fails
           const fallbackUsername = user.username || user.userId;
@@ -124,7 +100,6 @@ export const AuthProvider: React.FC<{
       localStorage.removeItem('sessionId');
       setUserId(null);
       setIdToken(null);
-      setCredentials(null);
     } catch (error) {
       console.error('Error signing out:', error);
     }
@@ -139,7 +114,6 @@ export const AuthProvider: React.FC<{
         isAuthenticated: !!user,
         sessionId,
         idToken,
-        credentials
       }}
     >
       {children}

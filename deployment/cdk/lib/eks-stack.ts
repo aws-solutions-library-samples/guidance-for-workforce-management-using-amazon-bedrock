@@ -14,16 +14,15 @@ export interface EksStackProps extends cdk.StackProps {
   resourcePrefix: string;
   environment: string;
   vpc: ec2.Vpc;
-  authenticatedRole: iam.Role;
   domainName: string;
   certificateArn: string;
   dataBucket: s3.Bucket;
+  description: string;
 }
 
 export class EksStack extends cdk.Stack {
   public readonly cluster: eks.Cluster;
   public readonly backendRepo: ecr.IRepository;
-  public readonly albControllerRole: iam.IRole;
 
   constructor(scope: Construct, id: string, props: EksStackProps) {
     super(scope, id, props);
@@ -31,7 +30,6 @@ export class EksStack extends cdk.Stack {
     const resourcePrefix = props.resourcePrefix;
     const environment = props.environment;
     const vpc = props.vpc;
-    const authenticatedRole = props.authenticatedRole;
     const dataBucket = props.dataBucket;
 
 
@@ -94,6 +92,20 @@ export class EksStack extends cdk.Stack {
       kubectlLayer: new KubectlV30Layer(this, `${resourcePrefix}-KubectlLayer`)
     });
 
+    // Create security group for ALB only
+    const albSecurityGroup = new ec2.SecurityGroup(this, `${resourcePrefix}-AlbSecurityGroup`, {
+      vpc: vpc,
+      description: 'Security group for Application Load Balancer',
+      allowAllOutbound: true, // ALB needs to reach targets
+    });
+
+    // Allow HTTPS traffic from internet
+    albSecurityGroup.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'Allow HTTPS traffic from internet'
+    );
+
     // Create IAM role for EKS node group
     const nodeGroupRole = new iam.Role(this, `${resourcePrefix}-NodeGroupRole`, {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
@@ -105,17 +117,7 @@ export class EksStack extends cdk.Stack {
       ],
     });
 
-    // Add Bedrock permissions to node group role
-    nodeGroupRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock:*',
-        'dynamodb:*',
-      ],
-      resources: ['*']
-    }));
-
-    // Create a managed node group
+    // Create a managed node group - let EKS handle security groups
     const nodeGroup = this.cluster.addNodegroupCapacity(`${resourcePrefix}-NodeGroup`, {
       instanceTypes: [
         ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM)
@@ -123,11 +125,11 @@ export class EksStack extends cdk.Stack {
       minSize: 2,
       desiredSize: 2,
       maxSize: 4,
-      diskSize: 20,
       nodeRole: nodeGroupRole,
       subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      amiType: eks.NodegroupAmiType.AL2_X86_64, // Amazon Linux 2
+      amiType: eks.NodegroupAmiType.AL2_X86_64,
       capacityType: eks.CapacityType.ON_DEMAND,
+      diskSize: 20,
       labels: {
         'role': 'application',
       },
@@ -137,83 +139,13 @@ export class EksStack extends cdk.Stack {
       },
     });
 
-    // Create IAM role for EKS admin access
-    const eksAdminRole = new iam.Role(this, `${resourcePrefix}-EksAdminRole`, {
-      assumedBy: new iam.ServicePrincipal('eks.amazonaws.com'),
-      description: 'IAM role for EKS admin access',
-    });
-
-    // Attach necessary policies to the admin role
-    eksAdminRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEKSClusterPolicy')
+    // Add ALB access to the cluster's default node security group after node group is created
+    const clusterNodeSecurityGroup = this.cluster.clusterSecurityGroup;
+    clusterNodeSecurityGroup.addIngressRule(
+      ec2.Peer.securityGroupId(albSecurityGroup.securityGroupId),
+      ec2.Port.tcp(8000),
+      'Allow traffic from ALB to backend pods'
     );
-
-    // Add custom policy for admin access
-    eksAdminRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'eks:*',
-        'cloudwatch:*',
-        'ecr:*',
-        'logs:*',
-        'kms:*',
-        'secretsmanager:*',
-      ],
-      resources: ['*']
-    }));
-
-    // Create access entry for admin role
-    const accessEntry = new eks.AccessEntry(this, `${resourcePrefix}-AdminAccessEntry`, {
-      cluster: this.cluster,
-      principal: eksAdminRole.roleArn,
-      accessPolicies: [
-        {
-          policy: 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy',
-          accessScope: {
-            type: eks.AccessScopeType.CLUSTER
-          }
-        }
-      ]
-    });
-
-    // Create access entry for the authenticated user (CDK deployer)
-    const userAccessEntry = new eks.AccessEntry(this, `${resourcePrefix}-UserAccessEntry`, {
-      cluster: this.cluster,
-      principal: authenticatedRole.roleArn,
-      accessPolicies: [
-        {
-          policy: 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy',
-          accessScope: {
-            type: eks.AccessScopeType.CLUSTER
-          }
-        }
-      ]
-    });
-
-
-    // Add aws-auth ConfigMap to handle assumed roles
-    const awsAuth = new eks.KubernetesManifest(this, 'AwsAuth', {
-      cluster: this.cluster,
-      manifest: [{
-        apiVersion: 'v1',
-        kind: 'ConfigMap',
-        metadata: {
-          name: 'aws-auth',
-          namespace: 'kube-system'
-        },
-        data: {
-          mapRoles: `- rolearn: arn:aws:iam::${cdk.Stack.of(this).account}:role/Admin
-  username: admin:{{SessionName}}
-  groups:
-    - system:masters
-- rolearn: arn:aws:sts::${cdk.Stack.of(this).account}:assumed-role/Admin/*
-  username: admin:{{SessionName}}
-  groups:
-    - system:masters`
-        }
-      }],
-      overwrite: true,
-    });
 
     // Create a namespace for our application
     const appNamespace = new eks.KubernetesManifest(this, 'AppNamespace', {
@@ -287,13 +219,64 @@ export class EksStack extends cdk.Stack {
     });
     backendServiceAccount.node.addDependency(appNamespace);
 
-    // Add permissions for Bedrock
+    // Add permissions for Bedrock - include both foundation models and inference profiles
     backendServiceAccount.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
-        'bedrock:*',
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream'        
       ],
-      resources: ['*']
+      resources: [
+        // Foundation models
+        `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-*`,
+        `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:us-east-2::foundation-model/amazon.titan-*`,
+        `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-*`,
+        `arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:eu-west-1::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:eu-west-1::foundation-model/amazon.titan-*`,
+        `arn:aws:bedrock:ap-southeast-1::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:ap-southeast-1::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:ap-southeast-1::foundation-model/amazon.titan-*`,
+        `arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.titan-*`,
+        // Inference profiles (cross-region and account-specific)
+        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+        `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/*`,
+        `arn:aws:bedrock:us-east-2:${this.account}:inference-profile/*`,
+        `arn:aws:bedrock:us-west-2:${this.account}:inference-profile/*`
+      ]
+    }));
+
+    // Add permissions for Bedrock Guardrails
+    backendServiceAccount.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:ApplyGuardrail'
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
+        `arn:aws:bedrock:us-east-1:${this.account}:guardrail/*`,
+        `arn:aws:bedrock:us-east-2:${this.account}:guardrail/*`,
+        `arn:aws:bedrock:us-west-2:${this.account}:guardrail/*`
+      ]
+    }));
+
+    // Add permissions for Knowledge Base retrieval - scoped to account
+    backendServiceAccount.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:Retrieve'
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:knowledge-base/*`
+      ]
     }));
     
     // Add explicit permissions for DynamoDB tables
@@ -326,14 +309,17 @@ export class EksStack extends cdk.Stack {
       ]
     }));
     
-    // Add permissions for KMS
+    // Add permissions for KMS - scoped to AWS managed keys and account keys
     backendServiceAccount.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'kms:Decrypt',
         'kms:GenerateDataKey'
       ],
-      resources: ['*']
+      resources: [
+        `arn:aws:kms:${this.region}:${this.account}:key/*`,
+        `arn:aws:kms:${this.region}:${this.account}:alias/aws/*`
+      ]
     }));
     
     // Add permissions for s3
@@ -356,6 +342,13 @@ export class EksStack extends cdk.Stack {
       value: backendServiceAccount.role.roleArn,
       description: 'The ARN of the IAM role for backend service account',
       exportName: `${resourcePrefix}-BackendRoleArn`
+    });
+
+    // Output the ALB security group ID
+    new cdk.CfnOutput(this, 'AlbSecurityGroupId', {
+      value: albSecurityGroup.securityGroupId,
+      description: 'The ID of the ALB security group',
+      exportName: `${resourcePrefix}-AlbSecurityGroupId`
     });
 
   }

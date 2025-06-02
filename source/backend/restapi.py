@@ -467,9 +467,9 @@ class LocalDBService:
         return item
         
     def get_todos(self, user_id):
-        self.logger.info(f"Getting todos for user_id: {user_id}")
+        # self.logger.info(f"Getting todos for user_id: {user_id}")
 
-        self.logger.info(f"User Table key schema: {self.user_table.key_schema}")
+        # self.logger.info(f"User Table key schema: {self.user_table.key_schema}")
 
         # get role for user_id, if role is StoreManager, get all todos, if role is StoreAssociate, get todos where taskOwner equals userId
         user_id = str(user_id).strip().lower()  # Normalize the email format
@@ -479,7 +479,7 @@ class LocalDBService:
         role_response = self.user_table.scan(
                 FilterExpression=Attr('userId').eq(user_id)
             )
-        self.logger.info(f"Role Response: {role_response}")
+        # self.logger.info(f"Role Response: {role_response}")
 
         role = role_response.get('Items')[0].get('userRole')
 
@@ -671,7 +671,7 @@ class LocalDBService:
         user_id = str(user_id).strip().lower()  # Normalize the email format
         
         self.logger.info(f"Formatted user_id: {user_id}")
-        self.logger.info(f"User Table: {self.user_table}")
+        # self.logger.info(f"User Table: {self.user_table}")
         role_response = self.user_table.scan(
                 FilterExpression=Attr('userId').eq(user_id)
             )
@@ -943,30 +943,69 @@ class LocalBedrockService:
 
         self.tools_list = tools_list
         if self.tools_list is not None:
-            self.toolConfig = {
-                'tools': [
-                    {
-                        'toolSpec': getattr(self.tools_list, method_name).bedrock_schema['toolSpec']
+            try:
+                # Get all tool methods with bedrock_schema
+                tool_methods = []
+                for method_name in dir(self.tools_list):
+                    if (not method_name.startswith('_') and 
+                        hasattr(getattr(self.tools_list, method_name), 'bedrock_schema')):
+                        tool_methods.append(method_name)
+                
+                logger.info(f"Found {len(tool_methods)} tool methods: {tool_methods}")
+                
+                # Build tool configuration
+                tools = []
+                for method_name in tool_methods:
+                    try:
+                        method = getattr(self.tools_list, method_name)
+                        tool_spec = method.bedrock_schema['toolSpec']
+                        
+                        # Validate tool spec structure
+                        if not all(key in tool_spec for key in ['name', 'description', 'inputSchema']):
+                            logger.error(f"Invalid tool spec for {method_name}: missing required fields")
+                            continue
+                            
+                        if 'json' not in tool_spec['inputSchema']:
+                            logger.error(f"Invalid tool spec for {method_name}: missing inputSchema.json")
+                            continue
+                            
+                        # Validate that inputSchema.json is a dict
+                        input_schema = tool_spec['inputSchema']['json']
+                        if not isinstance(input_schema, dict):
+                            logger.error(f"Invalid tool spec for {method_name}: inputSchema.json is not a dict")
+                            continue
+                            
+                        # Test JSON serialization
+                        json.dumps(input_schema)
+                        
+                        tools.append({'toolSpec': tool_spec})
+                        logger.info(f"Successfully added tool: {tool_spec['name']}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing tool {method_name}: {e}")
+                        continue
+                
+                if tools:
+                    self.toolConfig = {
+                        'tools': tools,
+                        'toolChoice': {'auto': {}}
                     }
-                    for method_name in dir(self.tools_list)
-                    if (
-                        not method_name.startswith('_') and 
-                        hasattr(getattr(self.tools_list, method_name), 'bedrock_schema')
-                    )
-                ],
-                'toolChoice': {'auto': {}}
-            }
-            
-            # Debug logging for tool configuration
-            logger.info(f"Number of tools configured: {len(self.toolConfig['tools'])}")
-            for i, tool in enumerate(self.toolConfig['tools']):
-                logger.info(f"Tool {i}: {tool['toolSpec']['name']}")
-                logger.info(f"Tool {i} inputSchema type: {type(tool['toolSpec']['inputSchema']['json'])}")
-                # Log a sample of the schema to verify it's a dict
-                if isinstance(tool['toolSpec']['inputSchema']['json'], dict):
-                    logger.info(f"Tool {i} schema keys: {list(tool['toolSpec']['inputSchema']['json'].keys())}")
+                    logger.info(f"Tool configuration created with {len(tools)} valid tools")
+                    
+                    # Final validation of the entire tool config
+                    try:
+                        json.dumps(self.toolConfig)
+                        logger.info("Tool configuration is valid JSON")
+                    except Exception as e:
+                        logger.error(f"Tool configuration is not valid JSON: {e}")
+                        self.toolConfig = None
                 else:
-                    logger.error(f"Tool {i} schema is not a dict: {tool['toolSpec']['inputSchema']['json']}")
+                    logger.warning("No valid tools found, disabling tool configuration")
+                    self.toolConfig = None
+                    
+            except Exception as e:
+                logger.error(f"Error setting up tool configuration: {e}")
+                self.toolConfig = None
         else:
             self.toolConfig = None
 
@@ -1111,12 +1150,19 @@ class LocalBedrockService:
         MAX_LOOPS = 10  # Reduced from 15 to prevent excessive loops and memory buildup
         loop_count = 0
         continue_loop = True
+        consecutive_failures = 0  # Track consecutive failures
+        MAX_CONSECUTIVE_FAILURES = 3  # Max failures before giving up
 
         while continue_loop:
             loop_count = loop_count + 1
             logger.info(f"Loop count: {loop_count}")
             if loop_count >= MAX_LOOPS:
                 logger.warning(f"Hit loop limit: {loop_count} - preventing infinite loop")
+                break
+                
+            # Stop if too many consecutive failures
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.error(f"Too many consecutive failures ({consecutive_failures}) - stopping conversation")
                 break
             
             # Memory management: limit message history size
@@ -1133,8 +1179,18 @@ class LocalBedrockService:
             
             try:
                 output = self.converse_with_tools(modelId, messages, system, toolConfig)
+                
+                # Check if output is valid
+                if not output or 'output' not in output or 'message' not in output['output']:
+                    logger.error("Invalid output structure from converse_with_tools")
+                    consecutive_failures += 1
+                    continue
+                
                 messages.append(output['output']['message'])
                 logger.info(f"{datetime.now():%H:%M:%S} - Got output from model...")
+                
+                # Reset consecutive failures on success
+                consecutive_failures = 0
 
                 function_calling = [c['toolUse'] for c in output['output']['message']['content'] if 'toolUse' in c]
                 logger.info(f'length of function_calling list: {len(function_calling)}')
@@ -1174,12 +1230,36 @@ class LocalBedrockService:
                     logger.info(f"{datetime.now():%H:%M:%S} - Function calling - Got final answer.")
             
             except Exception as e:
-                logger.error(f"Error in conversation loop {loop_count}: {type(e).__name__}")
+                consecutive_failures += 1
+                logger.error(f"Error in conversation loop {loop_count}: {type(e).__name__}: {str(e)}")
+                
+                # For certain errors, break immediately
+                if "ValidationException" in str(e) and "toolConfig" in str(e):
+                    logger.error("Tool configuration validation error - disabling tools and trying without them")
+                    # Try once without tools
+                    if toolConfig is not None:
+                        toolConfig = None
+                        consecutive_failures = 0  # Reset failures since we're changing approach
+                        continue
+                    else:
+                        logger.error("Still failing even without tools - stopping")
+                        break
+                
                 # Break the loop on serious errors to prevent crash
-                if loop_count >= 3:  # Allow a few retries but not too many
-                    logger.error("Too many errors in conversation loop, stopping to prevent crash")
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.error("Too many consecutive errors in conversation loop, stopping to prevent crash")
                     break
-                continue
+
+        # Ensure we return valid output even if conversation fails
+        if 'output' not in locals() or output is None:
+            logger.error("No valid output from conversation - creating fallback response")
+            output = {
+                'output': {
+                    'message': {
+                        'content': [{'text': "I apologize, but I encountered technical difficulties processing your request."}]
+                    }
+                }
+            }
 
         return messages, output
 
@@ -1238,12 +1318,27 @@ class LocalBedrockService:
         # Add the current user message
         self.messages.append({'role': 'user', 'content': [{'text': text}]})
 
+        # Initialize output to None to prevent UnboundLocalError
+        output = None
+        response = None
+
         try:
             # Store the current user message
             self.conv_store.store_message(current_user, sessionId, 'user', text)
 
             messages, output = self.converse(ToolsList(), self.model_id, self.messages, system_prompt, self.toolConfig)
-            response = output['output']['message']['content'][0]['text']
+            
+            # Check if output is valid
+            if output and 'output' in output and 'message' in output['output'] and 'content' in output['output']['message']:
+                content = output['output']['message']['content']
+                if content and len(content) > 0 and 'text' in content[0]:
+                    response = content[0]['text']
+                else:
+                    logger.error("Invalid output structure - no text content found")
+                    response = "I apologize, but I encountered an issue processing your request. Please try again."
+            else:
+                logger.error("Invalid output structure from conversation")
+                response = "I apologize, but I encountered an issue processing your request. Please try again."
 
             # Store the assistant response
             self.conv_store.store_message(current_user, sessionId, 'assistant', response)
@@ -1277,14 +1372,16 @@ class LocalBedrockService:
             throttling_incidents_this_request = final_metrics['total_throttling_incidents'] - initial_metrics['total_throttling_incidents']
             rate_limit_wait_this_request = final_metrics['total_rate_limit_wait_time'] - initial_metrics['total_rate_limit_wait_time']
             
-            logger.error(f"Error in call_bedrock after {request_duration:.2f}s: {type(e).__name__}")
+            logger.error(f"Error in call_bedrock after {request_duration:.2f}s: {type(e).__name__}: {str(e)}")
             if throttling_incidents_this_request > 0 or rate_limit_wait_this_request > 0:
                 logger.error(f"Throttling during failed request: {throttling_incidents_this_request} incidents, "
                            f"{rate_limit_wait_this_request:.2f}s wait time")
             
             # Clean up memory even on error
             cleanup_memory()
-            raise
+            
+            # Return a user-friendly error message instead of raising the exception
+            return "I apologize, but I'm currently experiencing technical difficulties. Please try again in a moment."
 
     @retry_with_backoff(max_retries=2, base_delay=BEDROCK_BASE_DELAY, max_delay=min(20.0, BEDROCK_MAX_DELAY), logger=logging.getLogger("LocalBedrockService"))
     def generate(self, prompt):
@@ -1519,27 +1616,96 @@ workforce = WorkforceService()
 
 def bedrock_tool(name, description):
     def decorator(func):
+        # Get function signature
+        sig = inspect.signature(func)
+        
+        # Create model fields properly handling Field() parameters
+        model_fields = {}
+        for param_name, param in sig.parameters.items():
+            if param_name == 'self':  # Skip self parameter
+                continue
+                
+            # Handle Field() parameters properly
+            if hasattr(param.default, '__class__') and param.default.__class__.__name__ == 'FieldInfo':
+                # This is a Field() parameter
+                field_info = param.default
+                model_fields[param_name] = (param.annotation, field_info)
+            elif param.default is not inspect.Parameter.empty:
+                # This is a regular parameter with a default value
+                model_fields[param_name] = (param.annotation, param.default)
+            else:
+                # This is a required parameter without default
+                model_fields[param_name] = (param.annotation, ...)
+
+        # Create the input model
         input_model = create_model(
             func.__name__ + "_input",
-            **{
-                name: (param.annotation, param.default)
-                for name, param in inspect.signature(func).parameters.items()
-                if param.default is not inspect.Parameter.empty
-            },
+            **model_fields
         )
 
-        # Get the schema as a dictionary, not a string
-        schema_dict = input_model.schema()
+        # Get the schema as a dictionary and ensure it's properly formatted
+        try:
+            schema_dict = input_model.model_json_schema()
+            
+            # Ensure the schema is a proper dictionary and clean up any issues
+            if not isinstance(schema_dict, dict):
+                logger.error(f"Schema for {name} is not a dict: {type(schema_dict)}")
+                schema_dict = {"type": "object", "properties": {}, "required": []}
+            
+            # Clean up the schema to ensure compatibility with Bedrock
+            if 'title' in schema_dict:
+                del schema_dict['title']
+            if '$defs' in schema_dict:
+                del schema_dict['$defs']
+                
+            # Ensure required fields
+            if 'type' not in schema_dict:
+                schema_dict['type'] = 'object'
+            if 'properties' not in schema_dict:
+                schema_dict['properties'] = {}
+                
+            logger.info(f"Tool {name} schema created successfully with {len(schema_dict.get('properties', {}))} properties")
+            
+        except Exception as e:
+            logger.error(f"Error creating schema for tool {name}: {e}")
+            # Fallback to basic schema
+            schema_dict = {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
         
+        # Ensure the schema is properly formatted for Bedrock
         func.bedrock_schema = {
             'toolSpec': {
                 'name': name,
                 'description': description,
                 'inputSchema': {
-                    'json': schema_dict  # This should be a dict, not a string
+                    'json': schema_dict  # This must be a dict, not a string
                 }
             }
         }
+        
+        # Validate that the schema is properly structured
+        try:
+            json.dumps(func.bedrock_schema)  # Test if it's JSON serializable
+        except Exception as e:
+            logger.error(f"Schema for {name} is not JSON serializable: {e}")
+            # Create a minimal valid schema
+            func.bedrock_schema = {
+                'toolSpec': {
+                    'name': name,
+                    'description': description,
+                    'inputSchema': {
+                        'json': {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                }
+            }
+        
         return func
 
     return decorator
@@ -1961,7 +2127,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(
     
     try:
         # Validate the token using the same function as WebSocket
-        logger.info(f"credentials: {credentials}")
+        # logger.info(f"credentials: {credentials}")
         user_info = validate_token(credentials.credentials)
         return user_info
     except HTTPException:
@@ -2299,6 +2465,6 @@ def cleanup_memory():
     """Force garbage collection and clean up resources"""
     try:
         collected = gc.collect()
-        logger.info(f"Garbage collection freed {collected} objects")
+        # logger.info(f"Garbage collection freed {collected} objects")
     except Exception as e:
         logger.error(f"Error during garbage collection: {e}")

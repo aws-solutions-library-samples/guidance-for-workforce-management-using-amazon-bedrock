@@ -195,46 +195,22 @@ def handler(event, context):
       ),
       description: 'IAM role for authenticated Cognito users',
     });
-
-    // Add permissions for Bedrock and DynamoDB
+    
+    // Only allow STS permissions for identity verification
     this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
-        'bedrock:*'
+        'sts:GetCallerIdentity'
       ],
       resources: ['*']
     }));
 
+    // Minimal Cognito permissions for user management
     this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-        'dynamodb:DeleteItem',
-        'dynamodb:Query',
-        'dynamodb:Scan',
-        'dynamodb:BatchGetItem',
-        'dynamodb:BatchWriteItem'
-      ],
-      resources: ['*']
-    }));
-
-    // Add STS permissions
-    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'sts:GetCallerIdentity',
-        'sts:TagSession'
-      ],
-      resources: ['*']
-    }));
-
-    // Add Cognito permissions
-    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'cognito-identity:*'
+        'cognito-identity:GetId',
+        'cognito-identity:GetCredentialsForIdentity'
       ],
       resources: [
         `arn:aws:cognito-identity:${this.region}:${this.account}:identitypool/${this.identityPool.ref}`

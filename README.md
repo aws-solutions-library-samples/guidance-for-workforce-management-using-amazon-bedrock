@@ -143,12 +143,28 @@ This solution must be deployed in the US East 1 (N. Virginia) region because the
 ## Deployment Steps
 
 ### 1. Clone the repository:
+
    ```
    git clone <repository-url>
    cd guidance-for-workforce-management-using-amazon-bedrock
    ```
 
-### 2. Configure Environment 
+### 2. Configure Amazon Bedrock Model Access (one-time setup)
+
+Amazon Bedrock offers a choice of high-performing foundation models (FMs) from leading AI companies like AI21 Labs, Anthropic, Cohere, Meta, Stability AI, and Amazon. In the Amazon Bedrock console, you can see the descriptions for these foundation models by the Base models link in the navigation pane.
+
+You need to request access to the foundation models before using them (see also [documentation here](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access-modify.html)). In the Amazon Bedrock console, do the following:
+
+Go to the [Amazon Bedrock console](https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1). In the navigation pane, select Model access. In the Model access page, you should see a list of base models. Click on the Manage model access button to edit your model access. Select the check box next to the following models to get started.
+
+All Amazon models.
+
+![Amazon Bedrock Model Access](assets/images/0_model_access.png)
+
+Click on the Save changes button and it may take several minutes to save the changes. This also brings you back to the Model access page. Models will show as Access granted on the Model access page under the Access status column, if access is granted.
+
+
+### 3. Configure Environment 
 
 Go to the deployment directoy.
 
@@ -199,7 +215,7 @@ You can use the provided `.env.example` file as a template.
 
 Update the EMAIL, PARENT_DOMAIN_NAME, DOMAIN_NAME, CERTIFICATE_ARN, WEB_CERTIFICATE_ARN with respective values for your environment, keep the other variables as-is.
 
-### 3. Run the Deployment Script
+### 4. Run the Deployment Script
 
 The deployment script will:
 1. Deploy the CDK stack with EKS, ECR, and other resources.
@@ -214,7 +230,7 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-### 4. Access the Application
+### 5. Access the Application
 
 After deployment, the script will output:
 - Frontend URL

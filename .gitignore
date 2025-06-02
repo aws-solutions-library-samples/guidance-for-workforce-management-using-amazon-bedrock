@@ -17,6 +17,7 @@ ENV/
 __pycache__/
 .Python
 *.pptx
+*.xlsx
 
 #test results
 tests/responses/

@@ -228,8 +228,57 @@ cat > alb-controller-policy.json << EOF
     {
       "Effect": "Allow",
       "Action": [
-        "elasticloadbalancing:*",
-        "ec2:*",
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:DeleteLoadBalancer",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:DeleteListener",
+        "elasticloadbalancing:DeleteRule",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:ModifyListener",
+        "elasticloadbalancing:ModifyRule",
+        "elasticloadbalancing:RegisterTargets",
+        "elasticloadbalancing:DeregisterTargets",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:DescribeRules",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:DescribeTargetGroupAttributes",
+        "elasticloadbalancing:DescribeListenerAttributes",
+        "elasticloadbalancing:DescribeSSLPolicies",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags",
+        "elasticloadbalancing:SetSecurityGroups",
+        "elasticloadbalancing:SetSubnets",
+        "elasticloadbalancing:SetIpAddressType",
+        "elasticloadbalancing:SetWebAcl",
+        "elasticloadbalancing:SetRulePriorities",
+        "elasticloadbalancing:ModifyListenerAttributes",
+        "elasticloadbalancing:DescribeCapacityReservation",
+        "elasticloadbalancing:ModifyCapacityReservation",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeTags",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateTags",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:DeleteSecurityGroup",
+        "ec2:GetSecurityGroupsForVpc",
         "cognito-idp:DescribeUserPoolClient",
         "acm:ListCertificates",
         "acm:DescribeCertificate",
@@ -384,6 +433,14 @@ echo "ALB Controller policy section completed. Continuing with deployment..."
 # Create the app namespace if it doesn't exist
 echo "Creating retail-app namespace if it doesn't exist..."
 kubectl create namespace ${STACK_NAME}-app --dry-run=client -o yaml | kubectl apply -f -
+
+# Apply Pod Security Standards to the namespace
+echo "Applying Pod Security Standards to namespace..."
+kubectl label namespace ${STACK_NAME}-app \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted \
+  --overwrite
 
 # Create ConfigMap for environment variables
 echo "Creating ConfigMap for environment variables..."
@@ -542,12 +599,30 @@ spec:
     spec:
       serviceAccountName: ${STACK_NAME}-backend-sa
       terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: ${STACK_NAME}-backend
         image: ${BACKEND_REPO_URI}:latest
         ports:
         - containerPort: 8000
           name: backend
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          readOnlyRootFilesystem: false
+          seccompProfile:
+            type: RuntimeDefault
         envFrom:
         - configMapRef:
             name: ${STACK_NAME}-app-config
@@ -606,6 +681,15 @@ spec:
 EOF
 
 
+# Get the ALB security group ID from CDK output
+ALB_SECURITY_GROUP_ID=$(aws cloudformation describe-stacks --stack-name ${STACK_NAME}EksStack --query "Stacks[0].Outputs[?OutputKey=='AlbSecurityGroupId'].OutputValue" --output text)
+echo "ALB Security Group ID: $ALB_SECURITY_GROUP_ID"
+
+# Get the access logs bucket name
+ACCESS_LOGS_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}AccessLogsBucketName'].OutputValue" --output text)
+echo "Access Logs Bucket Name: $ACCESS_LOGS_BUCKET_NAME"
+
+
 # Create Ingress with SSL
 echo "Creating Ingress resources with SSL..."
 # Apply the ingress resources and capture the output
@@ -616,11 +700,11 @@ metadata:
   name: ${STACK_NAME}-ingress
   namespace: ${STACK_NAME}-app
   annotations:
-    kubernetes.io/ingress.class: "alb"
     alb.ingress.kubernetes.io/scheme: "internet-facing"
     alb.ingress.kubernetes.io/target-type: "ip"
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443},{"HTTP":80}]'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
     alb.ingress.kubernetes.io/certificate-arn: "${CERTIFICATE_ARN}"
+    alb.ingress.kubernetes.io/security-groups: "${ALB_SECURITY_GROUP_ID}"
     # WebSocket support configuration
     alb.ingress.kubernetes.io/backend-protocol-version: "HTTP1"
     alb.ingress.kubernetes.io/target-group-attributes: >-
@@ -630,23 +714,16 @@ metadata:
       deregistration_delay.timeout_seconds=30
     alb.ingress.kubernetes.io/load-balancer-attributes: >-
       routing.http2.enabled=false,
-      idle_timeout.timeout_seconds=600
+      idle_timeout.timeout_seconds=600,
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=${ACCESS_LOGS_BUCKET_NAME}
     alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-port: "8000"
     alb.ingress.kubernetes.io/healthcheck-path: "/health"
     alb.ingress.kubernetes.io/success-codes: "200"
-    # Enable WebSocket upgrade headers
-    alb.ingress.kubernetes.io/actions.ssl-redirect: |
-      {
-        "Type": "redirect",
-        "RedirectConfig": {
-          "Protocol": "HTTPS",
-          "Port": "443",
-          "StatusCode": "HTTP_301"
-        }
-      }
 spec:
+  ingressClassName: alb
   rules:
   - http:
       paths:

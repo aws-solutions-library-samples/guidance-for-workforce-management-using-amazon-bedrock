@@ -496,7 +496,7 @@ def handler(event, context):
       ]
     });
     
-    // Add permissions to start ingestion jobs
+    // Add permissions to start ingestion jobs - scoped to account knowledge bases
     triggerSyncRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -504,7 +504,9 @@ def handler(event, context):
         'bedrock:GetIngestionJob',
         'bedrock:ListIngestionJobs'
       ],
-      resources: ['*']
+      resources: [
+        `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:knowledge-base/*`
+      ]
     }));
 
     // Create a Lambda function to trigger the data source sync job

@@ -107,12 +107,10 @@ const eksStack = new EksStack(app, `${stackName}EksStack`, {
   resourcePrefix: stackName,
   environment: envName,
   vpc: infraStack.vpc,
-  authenticatedRole: authStack.authenticatedRole,
-  domainName: domain,
-  certificateArn: certArn,
-  terminationProtection: false,
-  description: 'EKS cluster and related resources',
-  dataBucket: storageStack.dataBucket
+  domainName,
+  certificateArn,
+  dataBucket: storageStack.dataBucket,
+  description: 'EKS cluster and backend resources'
 });
 // Add tags
 cdk.Tags.of(eksStack).add('Component', 'EKS');
@@ -167,7 +165,6 @@ Object.entries(commonTags).forEach(([key, value]) => {
 storageStack.addDependency(infraStack);
 authStack.addDependency(infraStack);
 eksStack.addDependency(infraStack);
-eksStack.addDependency(authStack);
 openSearchStack.addDependency(storageStack);
 syntheticDataStack.addDependency(storageStack);
 guardrailsStack.addDependency(storageStack);

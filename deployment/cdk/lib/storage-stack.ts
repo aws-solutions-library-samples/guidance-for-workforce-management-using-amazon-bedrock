@@ -36,12 +36,62 @@ export class StorageStack extends cdk.Stack {
       throw new Error('domainName, certificateArn, and parentDomainName must be provided when creating the StorageStack');
     }
 
+    // Create a dedicated S3 access logs bucket
+    const accessLogsBucket = new s3.Bucket(this, `${resourcePrefix}-AccessLogsBucket`, {
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      lifecycleRules: [
+        {
+          id: 'DeleteOldAccessLogs',
+          enabled: true,
+          expiration: cdk.Duration.days(90), // Keep access logs for 90 days
+        },
+      ],
+    });
+
+    // Add bucket policy to allow ALB to write access logs
+    // ALB service account varies by region - this is for us-east-1
+    const albServiceAccountId = this.region === 'us-east-1' ? '127311923021' : 
+                                this.region === 'us-west-2' ? '797873946194' :
+                                this.region === 'eu-west-1' ? '156460612806' :
+                                this.region === 'ap-southeast-1' ? '114774131450' :
+                                '127311923021'; // Default to us-east-1
+
+    accessLogsBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AWSLogDeliveryWrite',
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AccountPrincipal(albServiceAccountId)],
+        actions: ['s3:PutObject'],
+        resources: [`${accessLogsBucket.bucketArn}/AWSLogs/${this.account}/*`],
+        conditions: {
+          StringEquals: {
+            's3:x-amz-acl': 'bucket-owner-full-control'
+          }
+        }
+      })
+    );
+
+    accessLogsBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AWSLogDeliveryAclCheck',
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AccountPrincipal(albServiceAccountId)],
+        actions: ['s3:GetBucketAcl'],
+        resources: [accessLogsBucket.bucketArn]
+      })
+    );
+
     // Create a CloudFront distribution and S3 bucket for hosting the web page
     this.websiteBucket = new s3.Bucket(this, `${resourcePrefix}-WebsiteBucket`, {
       publicReadAccess: false,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY, // NOT recommended for production
       autoDeleteObjects: true, // NOT recommended for production
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: 'website-access-logs/',
     });
 
     const CacheDisabledPolicy = new cloudfront.CachePolicy(this, `${resourcePrefix}-CachePolicy`, {
@@ -131,6 +181,8 @@ export class StorageStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: 'data-access-logs/',
     });
 
     // Output the S3 bucket name
@@ -138,6 +190,11 @@ export class StorageStack extends cdk.Stack {
       value: this.dataBucket.bucketName,
     });
 
+    // Output the access logs bucket name
+    new cdk.CfnOutput(this, `${resourcePrefix}-AccessLogsBucketName`, {
+      value: accessLogsBucket.bucketName,
+      description: 'The name of the S3 access logs bucket',
+    });
 
     // Create DynamoDB tables for synthetic data
     this.tables['sessionHistory'] = new dynamodb.Table(this, `${resourcePrefix}-SessionHistoryTable`, {
@@ -152,7 +209,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['userTasks'] = new dynamodb.Table(this, `${resourcePrefix}-UserTasksTable`, {
@@ -167,7 +226,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['userRole'] = new dynamodb.Table(this, `${resourcePrefix}-UserRoleTable`, {
@@ -178,7 +239,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['customer'] = new dynamodb.Table(this, `${resourcePrefix}-CustomerTable`, {
@@ -189,7 +252,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['dailyTasksByDay'] = new dynamodb.Table(this, `${resourcePrefix}-DailyTasksByDayTable`, {
@@ -200,7 +265,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['schedule'] = new dynamodb.Table(this, `${resourcePrefix}-ScheduleTable`, {
@@ -211,7 +278,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['timeoff'] = new dynamodb.Table(this, `${resourcePrefix}-TimeoffTable`, {
@@ -226,7 +295,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['products'] = new dynamodb.Table(this, `${resourcePrefix}-ProductsTable`, {
@@ -237,7 +308,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['customerTransactions'] = new dynamodb.Table(this, `${resourcePrefix}-CustomerTransactionsTable`, {
@@ -252,7 +325,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['feedback'] = new dynamodb.Table(this, `${resourcePrefix}-FeedbackTable`, {
@@ -263,7 +338,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
 
     this.tables['images'] = new dynamodb.Table(this, `${resourcePrefix}-ImagesTable`, {
@@ -274,7 +351,9 @@ export class StorageStack extends cdk.Stack {
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true
+      },
     });
   }
 }

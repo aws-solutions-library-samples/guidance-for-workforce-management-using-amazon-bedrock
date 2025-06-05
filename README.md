@@ -189,6 +189,8 @@ CERTIFICATE_ARN='XXX'
 # certificate for domain e.g. retail.anycompany.dev
 WEB_CERTIFICATE_ARN='XXX'
 
+
+# --- PLACEHOLDERS - DO NOT CHANGE BELOW ---
 # AWS Configuration
 AWS_REGION=us-east-1
 

@@ -56,7 +56,7 @@ The architecture is organized into several logical stacks:
 
 ### Cost
 
-You are responsible for the cost of the AWS services used while running this Guidance. As of May 2025, the cost for running this Guidance with the default settings in the AWS Region US East 1 (N. Virginia) is approximately $<n.nn> per month for processing ( <nnnnn> records ).
+You are responsible for the cost of the AWS services used while running this Guidance. As of May 2025, the cost for running this Guidance with the default settings in the AWS Region US East 1 (N. Virginia) is approximately $529.63 per month.
 
 We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance.
 
@@ -86,8 +86,8 @@ The following table provides a sample cost breakdown for deploying this Guidance
 ### AWS account requirements
 
 Before deploying this solution, you must have the following set up in your AWS account:
-- A public SSL/TLS certificate from AWS Certificate Manager (ACM)
-- A DNS domain or subdomain configured in Route 53 or your DNS provider
+- A public SSL/TLS certificate from AWS Certificate Manager (ACM) [documentation on how to create public certificate](https://aws.amazon.com/certificate-manager/getting-started/)
+- A DNS domain or subdomain configured in Route 53 or your DNS provider [documentation on how to create a domain](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-configuring.html)
 
 
 ### AWS CDK bootstrap
@@ -162,6 +162,8 @@ Go to the [Amazon Bedrock console](https://us-east-1.console.aws.amazon.com/bedr
 All Amazon models.
 
 ![Amazon Bedrock Model Access](assets/images/0_model_access.png)
+
+If you do not see Nova Sonic, please ensure you are in the us-east-1 region.
 
 Click on the Save changes button and it may take several minutes to save the changes. This also brings you back to the Model access page. Models will show as Access granted on the Model access page under the Access status column, if access is granted.
 

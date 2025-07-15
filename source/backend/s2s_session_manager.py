@@ -444,12 +444,9 @@ class S2sSessionManager:
                                 await self.send_raw_event(tool_content_end_event)
                         
                         # Put the response in the output queue for forwarding to the frontend
-                        if event_name != 'usageEvent':
-                            await self.output_queue.put(json_data)
-                            logger.info(f"Added response to output queue: {json_data.get('event', {}).keys()}")
-                        else:
-                            # Still log usage events but don't forward them
-                            logger.debug(f"Received usage event (not forwarded): {json_data.get('event', {}).keys()}")
+                        # Forward all events including usageEvent to the client
+                        await self.output_queue.put(json_data)
+                        logger.info(f"Added response to output queue: {json_data.get('event', {}).keys()}")
                     except json.JSONDecodeError as json_error:
                         logger.error(f"JSON decode error: {json_error}")
                         await self.output_queue.put({"raw_data": response_data})

@@ -250,7 +250,11 @@ export class EksStack extends cdk.Stack {
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
         `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/*`,
         `arn:aws:bedrock:us-east-2:${this.account}:inference-profile/*`,
-        `arn:aws:bedrock:us-west-2:${this.account}:inference-profile/*`
+        `arn:aws:bedrock:us-west-2:${this.account}:inference-profile/*`,
+        `arn:aws:bedrock:us-east-1:${this.account}:guardrail-profile/*`,
+        `arn:aws:bedrock:us-east-2:${this.account}:guardrail-profile/*`,
+        `arn:aws:bedrock:us-west-1:${this.account}:guardrail-profile/*`,
+        `arn:aws:bedrock:us-west-2:${this.account}:guardrail-profile/*`
       ]
     }));
 
@@ -264,7 +268,11 @@ export class EksStack extends cdk.Stack {
         `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
         `arn:aws:bedrock:us-east-1:${this.account}:guardrail/*`,
         `arn:aws:bedrock:us-east-2:${this.account}:guardrail/*`,
-        `arn:aws:bedrock:us-west-2:${this.account}:guardrail/*`
+        `arn:aws:bedrock:us-west-2:${this.account}:guardrail/*`,
+        `arn:aws:bedrock:us-east-1:${this.account}:guardrail-profile/*`,
+        `arn:aws:bedrock:us-east-2:${this.account}:guardrail-profile/*`,
+        `arn:aws:bedrock:us-west-1:${this.account}:guardrail-profile/*`,
+        `arn:aws:bedrock:us-west-2:${this.account}:guardrail-profile/*`
       ]
     }));
 

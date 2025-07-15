@@ -934,6 +934,7 @@ class LocalBedrockService:
         self.min_request_interval = BEDROCK_MIN_REQUEST_INTERVAL  # Use configurable value
         self.consecutive_throttles = 0
         self.throttle_backoff_multiplier = 2.0
+        self.last_throttle_time = 0  # Track when the last throttle occurred
         
         # Throttling metrics tracking
         self.total_rate_limit_wait_time = 0.0
@@ -1061,18 +1062,61 @@ class LocalBedrockService:
         self.last_request_time = time.time()
 
     def _handle_throttling_success(self):
-        """Reset throttling counters on successful request"""
+        """Reset throttling counters on successful request, but gradually"""
         if self.consecutive_throttles > 0:
-            self.logger.info(f"Throttling cleared after {self.consecutive_throttles} consecutive throttles. "
-                           f"Session totals: {self.total_throttling_incidents} incidents, {self.total_rate_limit_wait_time:.2f}s rate limit wait time")
-            self.consecutive_throttles = 0
+            # Check if enough time has passed since last throttle event
+            current_time = time.time()
+            time_since_throttle = current_time - self.last_throttle_time
+            
+            # Only gradually decrease throttle count if some time has passed
+            if time_since_throttle > 5:  # 5 seconds cooldown between throttle reductions
+                # Reduce throttle count gradually - don't reset to zero immediately
+                old_value = self.consecutive_throttles
+                self.consecutive_throttles = max(0, self.consecutive_throttles - 1)
+                self.logger.info(f"Throttling gradually clearing: {old_value} -> {self.consecutive_throttles} "
+                                f"(Session totals: {self.total_throttling_incidents} incidents, "
+                                f"{self.total_rate_limit_wait_time:.2f}s rate limit wait time)")
+            
+            # If we've completely cleared the throttling, log it
+            if self.consecutive_throttles == 0:
+                self.logger.info(f"Throttling completely cleared. "
+                                f"Session totals: {self.total_throttling_incidents} incidents, "
+                                f"{self.total_rate_limit_wait_time:.2f}s rate limit wait time")
 
     def _handle_throttling_error(self):
         """Increment throttling counters on throttling error"""
+        # Record time of the throttle event first to ensure accurate timestamps
+        current_time = time.time()
+        self.last_throttle_time = current_time
+        
+        # Update counters
         self.consecutive_throttles += 1
         self.total_throttling_incidents += 1
+        
+        # Increase backoff for subsequent requests
+        dynamic_interval = self.min_request_interval * (self.throttle_backoff_multiplier ** self.consecutive_throttles)
+        
         self.logger.warning(f"Throttling error #{self.consecutive_throttles} (session total: {self.total_throttling_incidents} incidents)")
+        self.logger.warning(f"Next request will be delayed by at least {dynamic_interval:.2f}s")
 
+    def reset_throttling_state(self):
+        """Reset throttling counters to recover from circuit breaker state"""
+        old_value = self.consecutive_throttles
+        self.consecutive_throttles = 0
+        self.last_request_time = 0
+        
+        # Reset throttling state but maintain last_throttle_time for global cooldown
+        # This ensures we don't immediately trigger throttling again
+        current_time = time.time()
+        if self.last_throttle_time == 0:
+            # If no previous throttle event, set it to a long time ago
+            self.last_throttle_time = current_time - 300  # 5 minutes ago
+            
+        if old_value > 0:
+            self.logger.info(f"Throttling state reset - circuit breaker cleared (was {old_value})")
+            
+        return old_value > 0
+        
     def get_throttling_metrics(self):
         """Get current throttling metrics for monitoring and debugging"""
         return {
@@ -1089,16 +1133,66 @@ class LocalBedrockService:
         # Apply rate limiting before making the request
         self._apply_rate_limiting()
         
-        # Circuit breaker: if too many consecutive throttles, fail fast
+        # Enhanced circuit breaker with auto-reset after cooldown
         if self.consecutive_throttles > 5:
-            metrics = self.get_throttling_metrics()
-            self.logger.error(f"Circuit breaker activated - too many consecutive throttles ({self.consecutive_throttles}). "
-                            f"Session metrics: {metrics['total_throttling_incidents']} total incidents, "
-                            f"{metrics['total_rate_limit_wait_time']:.2f}s total rate limit wait time")
-            raise ClientError(
-                {'Error': {'Code': 'ServiceUnavailable', 'Message': 'Service temporarily unavailable due to rate limiting'}}, 
-                'converse'
-            )
+            current_time = time.time()
+            
+            # Add a global cooldown period based on the time since the last throttle event
+            global_cooldown_period = 60  # 60 seconds global cooldown
+            auto_reset_cooldown = 30     # 30 seconds for auto reset
+            
+            # Check if we have last_throttle_time and it's valid
+            has_valid_throttle_time = hasattr(self, 'last_throttle_time') and self.last_throttle_time > 0
+            
+            if has_valid_throttle_time:
+                time_since_throttle = current_time - self.last_throttle_time
+                
+                # Check for auto-reset condition
+                if time_since_throttle > auto_reset_cooldown:
+                    self.logger.info(f"Auto-resetting circuit breaker after {auto_reset_cooldown}s cooldown")
+                    self.reset_throttling_state()
+                    # Add extra delay to ensure we don't immediately trigger more throttling
+                    extra_delay = 2.0
+                    self.logger.info(f"Adding extra {extra_delay:.1f}s delay after circuit breaker reset")
+                    time.sleep(extra_delay)
+                    # Continue with the request after the delay
+                    
+                # If we're in global cooldown mode, enforce a waiting period
+                elif time_since_throttle < global_cooldown_period:
+                    remaining_cooldown = global_cooldown_period - time_since_throttle
+                    metrics = self.get_throttling_metrics()
+                    self.logger.error(f"Circuit breaker activated - {remaining_cooldown:.1f}s remaining in global cooldown period. "
+                                    f"Session metrics: {metrics['total_throttling_incidents']} total incidents, "
+                                    f"{metrics['total_rate_limit_wait_time']:.2f}s total rate limit wait time")
+                    
+                    # For very short remaining cooldowns, just wait it out instead of failing
+                    if remaining_cooldown < 5:
+                        self.logger.info(f"Short cooldown remaining ({remaining_cooldown:.1f}s) - waiting it out")
+                        time.sleep(remaining_cooldown)
+                        # Partially reset throttle count to allow the request
+                        self.consecutive_throttles = 3  # Set to half the circuit breaker threshold
+                    else:
+                        # Otherwise fail the request with ServiceUnavailable
+                        raise ClientError(
+                            {'Error': {'Code': 'ServiceUnavailable', 'Message': 'Service temporarily unavailable due to rate limiting'}}, 
+                            'converse'
+                        )
+                else:
+                    # We're past the global cooldown but not yet at auto-reset, reduce throttle count
+                    old_value = self.consecutive_throttles
+                    self.consecutive_throttles = max(3, self.consecutive_throttles - 1)
+                    self.logger.info(f"Reducing throttle count: {old_value} -> {self.consecutive_throttles} (past global cooldown)")
+            else:
+                # No valid last_throttle_time, initialize it and raise error
+                self.last_throttle_time = current_time
+                metrics = self.get_throttling_metrics()
+                self.logger.error(f"Circuit breaker activated - consecutive throttles ({self.consecutive_throttles}) without valid timestamp. "
+                                f"Session metrics: {metrics['total_throttling_incidents']} total incidents, "
+                                f"{metrics['total_rate_limit_wait_time']:.2f}s total rate limit wait time")
+                raise ClientError(
+                    {'Error': {'Code': 'ServiceUnavailable', 'Message': 'Service temporarily unavailable due to rate limiting'}}, 
+                    'converse'
+                )
         
         try:
             response = self.bedrock_client.converse(
@@ -2178,8 +2272,15 @@ async def chat(query: str, userId: str, sessionId: str, current_user: dict = Dep
 @app.get("/api/reset_chat")
 async def reset_chat(userId: str, sessionId: str, current_user: dict = Depends(get_current_user)):
     
+    # Delete conversation history
     results = bedrock_service.conv_store.delete_conversation_history(userId, sessionId)
-    return {"response": results}
+    
+    # Reset throttling state
+    was_throttled = bedrock_service.reset_throttling_state()
+    if was_throttled:
+        logger.info(f"Reset throttling state for user {userId}, session {sessionId}")
+    
+    return {"response": results, "throttling_reset": was_throttled}
 
 @app.get("/api/todos")
 async def get_todos(userId: str, current_user: dict = Depends(get_current_user)):

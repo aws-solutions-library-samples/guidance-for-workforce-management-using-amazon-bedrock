@@ -7,9 +7,11 @@ import wave
 import os
 import base64
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import argparse
 import logging
+import boto3
+import re
 
 import os
 import wave
@@ -79,12 +81,18 @@ def find_dotenv():
         Path('.env'),
         # Parent directory (for when running from a subdirectory)
         Path('..') / '.env',
-        # Deployment directory 
+        # Deployment directory (from project root)
+        Path('deployment') / '.env',
+        # Deployment directory (from tests directory)
         Path('..') / 'deployment' / '.env',
         # From the current working directory
         Path(os.getcwd()) / '.env',
+        # From the current working directory's deployment subdirectory
+        Path(os.getcwd()) / 'deployment' / '.env',
         # From the parent of the current working directory
         Path(os.getcwd()).parent / '.env',
+        # From the parent of the current working directory's deployment subdirectory
+        Path(os.getcwd()).parent / 'deployment' / '.env',
     ]
     
     # Try each path
@@ -101,6 +109,12 @@ def find_dotenv():
 # Load environment variables
 env_path = find_dotenv()
 load_dotenv(dotenv_path=env_path)
+
+# Define environment variable names for credentials
+ENV_COGNITO_EMAIL = "EMAIL"
+ENV_COGNITO_PASSWORD = "COGNITO_PASSWORD"
+ENV_SERVER_URL = "SERVER_URL"
+ENV_AWS_REGION = "AWS_REGION"
 
 
 
@@ -297,6 +311,9 @@ class NovaAsyncClient:
         self.debug = debug
         self.recording_complete_sent = False
         self.audio_timestamps = []
+        self.last_audio_sent_time = None
+        self.first_audio_received_time = None
+        self.time_to_first_audio = None
         
         # S2S protocol state
         self.prompt_name = None
@@ -308,11 +325,39 @@ class NovaAsyncClient:
         self.audio_responses = {}
         self.text_responses = {}
         
+        # Usage event tracking
+        self.usage_events = []
+        self.token_usage = {
+            "totalInputTokens": 0,
+            "totalOutputTokens": 0,
+            "totalTokens": 0,
+            "details": {
+                "input": {
+                    "speechTokens": 0,
+                    "textTokens": 0
+                },
+                "output": {
+                    "speechTokens": 0,
+                    "textTokens": 0
+                }
+            }
+        }
+        
         if self.debug:
             logger.setLevel(logging.DEBUG)
 
     def build_url(self):
         """Build WebSocket URL with parameters, converting HTTPS to WSS if needed"""
+        # Check if server_url is None and provide a default or raise a meaningful error
+        if self.server_url is None:
+            # Use a default URL for the retail demo if available in the environment
+            domain_name = os.getenv('DOMAIN_NAME')
+            if domain_name:
+                self.server_url = f"https://backend.{domain_name}"
+                logger.info(f"Using domain from environment: {self.server_url}")
+            else:
+                raise ValueError("No server URL provided and no DOMAIN_NAME found in environment variables. Please set SERVER_URL or DOMAIN_NAME in your .env file.")
+        
         url = self.server_url
         
         # Convert HTTPS URLs to WebSocket URLs
@@ -591,6 +636,9 @@ class NovaAsyncClient:
             return False
 
         try:
+            # Record timestamp of last audio chunk sent
+            self.last_audio_sent_time = time.time()
+            
             # Convert to base64 using frontend-compatible method
             base64_audio = self.convert_to_base64_frontend_style(audio_data)
             
@@ -770,18 +818,29 @@ class NovaAsyncClient:
             "audio_responses_count": len(audio_responses)
         }
         
+        # Add time to first audio if available
+        if self.time_to_first_audio is not None:
+            summary_data["time_to_first_audio"] = round(self.time_to_first_audio, 3)
+        
         # Add input filename if provided
         if input_filename:
             summary_data["input_file"] = input_filename
         
         # Add audio information if available
         if audio_responses:
+            # Calculate total bytes in audio responses
+            total_audio_bytes = sum(len(chunk) for chunk in audio_responses)
+            
+            # Calculate duration based on audio format (16-bit samples at 24kHz)
+            calculated_duration = total_audio_bytes / 2 / 24000  # bytes to samples to seconds
+            
             summary_data["audio"] = {
                 "total_chunks": len(audio_responses),
-                "total_size_bytes": sum(len(chunk) for chunk in audio_responses)
+                "total_size_bytes": total_audio_bytes,
+                "duration_seconds": round(calculated_duration, 2)
             }
             
-            # Add duration if available
+            # Add duration from timestamps if available (more accurate)
             if audio_duration is not None:
                 summary_data["audio"]["duration_seconds"] = round(audio_duration, 2)
         
@@ -805,6 +864,21 @@ class NovaAsyncClient:
                 processed_text_responses.append(response_data)
             
             summary_data["text_responses"] = processed_text_responses
+        
+        # Add usage events
+        if self.usage_events:
+            summary_data["usage_events"] = self.usage_events
+            
+        # Always include token usage information, even if zero
+        summary_data["token_usage"] = self.token_usage.copy()
+        
+        # Log token usage summary
+        logger.info(f"Token usage summary:")
+        logger.info(f"  Input speech tokens: {self.token_usage['details']['input']['speechTokens']}")
+        logger.info(f"  Input text tokens: {self.token_usage['details']['input']['textTokens']}")
+        logger.info(f"  Output speech tokens: {self.token_usage['details']['output']['speechTokens']}")
+        logger.info(f"  Output text tokens: {self.token_usage['details']['output']['textTokens']}")
+        logger.info(f"  Total tokens: {self.token_usage['totalTokens']}")
         
         # Save summary as JSON
         summary_file = os.path.join(output_dir, f"{prefix}session_summary_{timestamp}.json")
@@ -1031,6 +1105,15 @@ class NovaAsyncClient:
             # Handle binary messages (audio data)
             if isinstance(message, bytes):
                 logger.debug(f"Received binary data of size: {len(message)}")
+                
+                # Record timestamp of first audio chunk received
+                if not self.first_audio_received_time:
+                    self.first_audio_received_time = time.time()
+                    # Calculate time to first audio if we have both timestamps
+                    if self.last_audio_sent_time:
+                        self.time_to_first_audio = self.first_audio_received_time - self.last_audio_sent_time
+                        logger.info(f"Time to first audio: {self.time_to_first_audio:.3f} seconds")
+                
                 self.responses.append(("audio", message))
                 return
             
@@ -1091,6 +1174,51 @@ class NovaAsyncClient:
                 elif event_type == 'sessionEnd':
                     logger.info("Session ended")
                     self.session_started = False
+                
+                elif event_type == 'usageEvent':
+                    logger.info("Received usage event")
+                    # Store the usage event
+                    self.usage_events.append(event_data)
+                    
+                    # Update token usage aggregates
+                    if 'totalInputTokens' in event_data:
+                        self.token_usage['totalInputTokens'] = event_data.get('totalInputTokens', 0)
+                    if 'totalOutputTokens' in event_data:
+                        self.token_usage['totalOutputTokens'] = event_data.get('totalOutputTokens', 0)
+                    if 'totalTokens' in event_data:
+                        self.token_usage['totalTokens'] = event_data.get('totalTokens', 0)
+                    
+                    # Update detailed token usage if available
+                    if 'details' in event_data:
+                        details = event_data.get('details', {})
+                        if 'delta' in details:
+                            delta = details.get('delta', {})
+                            # Update input tokens
+                            if 'input' in delta:
+                                input_delta = delta.get('input', {})
+                                self.token_usage['details']['input']['speechTokens'] += input_delta.get('speechTokens', 0)
+                                self.token_usage['details']['input']['textTokens'] += input_delta.get('textTokens', 0)
+                            # Update output tokens
+                            if 'output' in delta:
+                                output_delta = delta.get('output', {})
+                                self.token_usage['details']['output']['speechTokens'] += output_delta.get('speechTokens', 0)
+                                self.token_usage['details']['output']['textTokens'] += output_delta.get('textTokens', 0)
+                        
+                        # If total values are provided, use those instead
+                        if 'total' in details:
+                            total = details.get('total', {})
+                            if 'input' in total:
+                                input_total = total.get('input', {})
+                                self.token_usage['details']['input']['speechTokens'] = input_total.get('speechTokens', 
+                                    self.token_usage['details']['input']['speechTokens'])
+                                self.token_usage['details']['input']['textTokens'] = input_total.get('textTokens', 
+                                    self.token_usage['details']['input']['textTokens'])
+                            if 'output' in total:
+                                output_total = total.get('output', {})
+                                self.token_usage['details']['output']['speechTokens'] = output_total.get('speechTokens', 
+                                    self.token_usage['details']['output']['speechTokens'])
+                                self.token_usage['details']['output']['textTokens'] = output_total.get('textTokens', 
+                                    self.token_usage['details']['output']['textTokens'])
             
             # Handle connection status
             elif data.get('type') == 'connection_status' and data.get('status') == 'ready':
@@ -1164,13 +1292,17 @@ class NovaAsyncClient:
 
             logger.info(f"Completed streaming {chunk_count} chunks, total bytes: {total_bytes}")
             
+            # Add a delay to ensure all audio chunks are processed before ending the content
+            logger.info("Adding delay to ensure all audio chunks are processed...")
+            await asyncio.sleep(2.0)
+            
             # 4. Properly stop audio streaming which will send content end event
             logger.info("Stopping audio streaming...")
             await self.stop_audio_streaming()
             
             # 5. Give the backend time to process the content end and generate response
             logger.info("Waiting for response processing...")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
             
             return True
             
@@ -1646,10 +1778,30 @@ class NovaAsyncClient:
         self.text_content_name = None
         self.session_id = None
         self.websocket = None
+        self.last_audio_sent_time = None
+        self.first_audio_received_time = None
+        self.time_to_first_audio = None
         logger.debug("Client state reset for loop reuse")
 
-async def run_test(audio_path, user_id=None, server_url=None, debug=False, client_id=None, password=None):
-    """Run a complete audio test with a single audio file"""
+async def run_test(audio_path, user_id=None, server_url=None, debug=False, client_id=None, password=None, output_dir="responses/model_sonic", retrieve_logs=True, log_group_name=None):
+    """Run a complete audio test with a single audio file
+    
+    Args:
+        audio_path (str): Path to the audio file to test
+        user_id (str, optional): User ID for authentication
+        server_url (str, optional): WebSocket server URL
+        debug (bool): Enable debug logging
+        client_id (str, optional): Client ID for WebSocket connection
+        password (str, optional): Password for Cognito authentication
+        output_dir (str): Directory to save responses to (default: "responses/model_sonic")
+        retrieve_logs (bool): Whether to retrieve CloudWatch logs for function calls (default: True)
+        log_group_name (str, optional): CloudWatch log group name to search for function calls
+    """
+    # Use environment variables if parameters are not provided
+    user_id = user_id or os.environ.get(ENV_COGNITO_EMAIL)
+    password = password or os.environ.get(ENV_COGNITO_PASSWORD)
+    server_url = server_url or os.environ.get(ENV_SERVER_URL)
+    
     logger.info(f"Running test with audio file: {audio_path}")
     logger.info(f"Using server URL: {server_url}")
     logger.info(f"Using user ID: {user_id}")
@@ -1660,6 +1812,7 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
     logger.info(f"Using client ID: {client_id}")
 
     client = None
+    start_time = datetime.now()  # Record start time for CloudWatch logs
     
     try:
         client = NovaAsyncClient(user_id=user_id, password=password, server_url=server_url, debug=debug, client_id=client_id)
@@ -1734,12 +1887,49 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
             try:
                 logger.debug("Performing final cleanup...")
                 await client.close()
-                client.save_responses(input_filename=audio_path)
+                
+                # Save responses
+                client.save_responses(output_dir=output_dir, input_filename=audio_path)
                 
                 # Log summary
                 audio_responses = len([r for r, c in client.responses if r == "audio"])
                 text_responses = len([r for r, c in client.responses if r == "text"])
                 logger.info(f"Test completed with {audio_responses} audio responses and {text_responses} text responses")
+                
+                # Retrieve CloudWatch logs for function calls if requested
+                if retrieve_logs and client.session_id:
+                    end_time = datetime.now()
+                    try:
+                        logger.info("Retrieving CloudWatch logs for function calls...")
+                        logs_retriever = CloudWatchLogsRetriever(
+                            log_group_name=log_group_name
+                        )
+                        
+                        # Extract function calls from logs
+                        function_calls = logs_retriever.extract_function_calls(
+                            start_time=start_time,
+                            end_time=end_time,
+                            user_id=user_id,
+                            session_id=client.session_id
+                        )
+                        
+                        if function_calls:
+                            logger.info(f"Found {len(function_calls)} function calls in CloudWatch logs")
+                            
+                            # Save function calls to JSON file
+                            function_calls_file = os.path.join(
+                                output_dir, 
+                                f"{os.path.splitext(os.path.basename(audio_path))[0]}_function_calls.json"
+                            )
+                            
+                            with open(function_calls_file, 'w') as f:
+                                json.dump(function_calls, f, indent=2, default=str)
+                                
+                            logger.info(f"Saved function calls to {function_calls_file}")
+                        else:
+                            logger.warning("No function calls found in CloudWatch logs")
+                    except Exception as e:
+                        logger.error(f"Error retrieving CloudWatch logs: {e}")
                 
                 # Force garbage collection to help with memory management in loops
                 import gc
@@ -1751,7 +1941,7 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
     
     return client
 
-async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False, password=None, delay_between_tests=2.0):
+async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False, password=None, delay_between_tests=2.0, output_dir="./responses"):
     """
     Run tests in a loop with proper resource management and error handling.
     
@@ -1762,6 +1952,7 @@ async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False,
         debug (bool): Enable debug logging
         password (str, optional): Password for Cognito authentication  
         delay_between_tests (float): Delay in seconds between test iterations
+        output_dir (str): Directory to save responses to
         
     Returns:
         list: List of test results (client objects or None for failures)
@@ -1787,7 +1978,8 @@ async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False,
                 server_url=server_url,
                 debug=debug,
                 client_id=client_id,
-                password=password
+                password=password,
+                output_dir=output_dir
             )
             
             results.append(result)
@@ -1823,94 +2015,481 @@ async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False,
     
     return results
 
+async def run_multiple_test_loops(audio_files, num_runs=10, user_id=None, server_url=None, debug=False, password=None, delay_between_tests=2.0, delay_between_runs=5.0, output_dir="responses/model_sonic"):
+    """
+    Run the test loop multiple times, with each run storing results in its own subdirectory.
+    
+    Args:
+        audio_files (list): List of audio file paths to test
+        num_runs (int): Number of times to run the test loop
+        user_id (str, optional): User ID for authentication
+        server_url (str, optional): WebSocket server URL
+        debug (bool): Enable debug logging
+        password (str, optional): Password for Cognito authentication
+        delay_between_tests (float): Delay in seconds between test iterations
+        delay_between_runs (float): Delay in seconds between test loop runs
+        output_dir (str): Base directory to save responses to (default: "responses/model_sonic")
+        
+    Returns:
+        list: List of results from each test loop run
+    """
+    all_results = []
+    
+    logger.info(f"Starting {num_runs} test loop runs")
+    
+    for run_num in range(1, num_runs + 1):
+        logger.info(f"\n{'#'*80}")
+        logger.info(f"TEST RUN {run_num}/{num_runs}")
+        logger.info(f"{'#'*80}")
+        
+        # Create a subdirectory for this test run
+        run_output_dir = os.path.join(output_dir, f"test_run_{run_num}")
+        os.makedirs(run_output_dir, exist_ok=True)
+        
+        try:
+            # Run the test loop for this run
+            results = await run_test_loop(
+                audio_files=audio_files,
+                user_id=user_id,
+                server_url=server_url,
+                debug=debug,
+                password=password,
+                delay_between_tests=delay_between_tests,
+                output_dir=run_output_dir
+            )
+            
+            all_results.append(results)
+            
+            # Log summary for this run
+            successful_tests = sum(1 for r in results if r is not None)
+            failed_tests = len(results) - successful_tests
+            
+            logger.info(f"\n{'='*60}")
+            logger.info(f"TEST RUN {run_num}/{num_runs} SUMMARY")
+            logger.info(f"{'='*60}")
+            logger.info(f"Total tests: {len(audio_files)}")
+            logger.info(f"Successful: {successful_tests}")
+            logger.info(f"Failed: {failed_tests}")
+            logger.info(f"Success rate: {(successful_tests/len(audio_files)*100):.1f}%")
+            logger.info(f"Results saved to: {run_output_dir}")
+            
+            # Add delay between runs (except after the last one)
+            if run_num < num_runs and delay_between_runs > 0:
+                logger.info(f"Waiting {delay_between_runs} seconds before next test run...")
+                await asyncio.sleep(delay_between_runs)
+                
+        except Exception as e:
+            logger.error(f"Error in test run {run_num}: {e}")
+            if debug:
+                import traceback
+                traceback.print_exc()
+            all_results.append([])
+    
+    # Overall summary
+    logger.info(f"\n{'#'*80}")
+    logger.info(f"OVERALL SUMMARY FOR {num_runs} TEST RUNS")
+    logger.info(f"{'#'*80}")
+    
+    for run_num, results in enumerate(all_results, 1):
+        successful_tests = sum(1 for r in results if r is not None)
+        if len(results) > 0:
+            success_rate = (successful_tests / len(results)) * 100
+        else:
+            success_rate = 0
+        logger.info(f"Run {run_num}: {successful_tests}/{len(results)} successful ({success_rate:.1f}%)")
+    
+    return all_results
+
+class CloudWatchLogsRetriever:
+    """
+    Retrieves and parses CloudWatch logs to extract function calls and other relevant information.
+    """
+    
+    def __init__(self, region=None, log_group_name=None):
+        """
+        Initialize the CloudWatch logs retriever.
+        
+        Args:
+            region (str, optional): AWS region
+            log_group_name (str, optional): CloudWatch log group name
+        """
+        self.region = region or os.getenv('AWS_REGION', 'us-east-1')
+        self.log_group_name = log_group_name or os.getenv('CLOUDWATCH_LOG_GROUP', '/aws/lambda/retail-assistant-function')
+        
+        # Initialize CloudWatch logs client
+        self.logs_client = boto3.client('logs', region_name=self.region)
+        
+        logger.info(f"Initialized CloudWatch logs retriever for region: {self.region}")
+        logger.info(f"Log group name: {self.log_group_name}")
+    
+    def get_log_streams(self, prefix=None, limit=50):
+        """
+        Get log streams from the specified log group.
+        
+        Args:
+            prefix (str, optional): Filter log streams by prefix
+            limit (int): Maximum number of log streams to return
+            
+        Returns:
+            list: List of log stream names
+        """
+        try:
+            params = {
+                'logGroupName': self.log_group_name,
+                'descending': True,
+                'orderBy': 'LastEventTime',
+                'limit': limit
+            }
+            
+            if prefix:
+                params['logStreamNamePrefix'] = prefix
+                
+            response = self.logs_client.describe_log_streams(**params)
+            
+            log_streams = [stream['logStreamName'] for stream in response.get('logStreams', [])]
+            logger.info(f"Found {len(log_streams)} log streams")
+            
+            return log_streams
+            
+        except Exception as e:
+            logger.error(f"Error getting log streams: {e}")
+            return []
+    
+    def get_log_events(self, log_stream_name, start_time=None, end_time=None, limit=1000):
+        """
+        Get log events from a specific log stream.
+        
+        Args:
+            log_stream_name (str): Name of the log stream
+            start_time (int, optional): Start time in milliseconds since epoch
+            end_time (int, optional): End time in milliseconds since epoch
+            limit (int): Maximum number of log events to return
+            
+        Returns:
+            list: List of log events
+        """
+        try:
+            params = {
+                'logGroupName': self.log_group_name,
+                'logStreamName': log_stream_name,
+                'limit': limit
+            }
+            
+            if start_time:
+                params['startTime'] = start_time
+            if end_time:
+                params['endTime'] = end_time
+                
+            response = self.logs_client.get_log_events(**params)
+            
+            events = response.get('events', [])
+            logger.info(f"Retrieved {len(events)} log events from {log_stream_name}")
+            
+            return events
+            
+        except Exception as e:
+            logger.error(f"Error getting log events: {e}")
+            return []
+    
+    def search_logs(self, query, start_time=None, end_time=None, limit=100):
+        """
+        Search logs using CloudWatch Logs Insights.
+        
+        Args:
+            query (str): CloudWatch Logs Insights query
+            start_time (datetime, optional): Start time
+            end_time (datetime, optional): End time
+            limit (int): Maximum number of results to return
+            
+        Returns:
+            dict: Query results
+        """
+        try:
+            # Convert datetime objects to milliseconds since epoch
+            if start_time is None:
+                start_time = datetime.now() - timedelta(hours=1)
+            if end_time is None:
+                end_time = datetime.now()
+                
+            start_time_ms = int(start_time.timestamp() * 1000)
+            end_time_ms = int(end_time.timestamp() * 1000)
+            
+            # Start query
+            start_query_response = self.logs_client.start_query(
+                logGroupName=self.log_group_name,
+                startTime=start_time_ms,
+                endTime=end_time_ms,
+                queryString=query,
+                limit=limit
+            )
+            
+            query_id = start_query_response['queryId']
+            
+            # Wait for query to complete
+            response = None
+            while response is None or response['status'] == 'Running':
+                logger.info("Waiting for query to complete...")
+                time.sleep(1)
+                response = self.logs_client.get_query_results(queryId=query_id)
+                
+            logger.info(f"Query completed with status: {response['status']}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error searching logs: {e}")
+            return {'status': 'Failed', 'results': [], 'error': str(e)}
+    
+    def extract_function_calls(self, start_time=None, end_time=None, user_id=None, session_id=None):
+        """
+        Extract function calls from CloudWatch logs.
+        
+        Args:
+            start_time (datetime, optional): Start time
+            end_time (datetime, optional): End time
+            user_id (str, optional): Filter by user ID
+            session_id (str, optional): Filter by session ID
+            
+        Returns:
+            list: List of function calls with details
+        """
+        try:
+            # Build query
+            query = "fields @timestamp, @message | sort @timestamp desc"
+            
+            # Add filters
+            filters = []
+            if user_id:
+                filters.append(f"@message like '{user_id}'")
+            if session_id:
+                filters.append(f"@message like '{session_id}'")
+                
+            # Add function call filter
+            filters.append("@message like 'Invoking function' or @message like 'Function call' or @message like 'Lambda function'")
+            
+            if filters:
+                query += " | filter " + " and ".join(filters)
+                
+            # Execute query
+            response = self.search_logs(query, start_time, end_time)
+            
+            if response['status'] != 'Complete':
+                logger.error(f"Query failed with status: {response['status']}")
+                return []
+                
+            # Parse results to extract function calls
+            function_calls = []
+            for result in response.get('results', []):
+                # Convert result to dict for easier access
+                result_dict = {field['field']: field.get('value', '') for field in result}
+                
+                # Extract timestamp
+                timestamp_str = result_dict.get('@timestamp', '')
+                timestamp = datetime.fromtimestamp(int(timestamp_str) / 1000) if timestamp_str else None
+                
+                # Extract message
+                message = result_dict.get('@message', '')
+                
+                # Parse function name and parameters
+                function_name = None
+                parameters = {}
+                
+                # Different log formats
+                if 'Invoking function' in message:
+                    match = re.search(r'Invoking function: (\w+)', message)
+                    if match:
+                        function_name = match.group(1)
+                        
+                    # Try to extract parameters as JSON
+                    param_match = re.search(r'with parameters: ({.*})', message)
+                    if param_match:
+                        try:
+                            parameters = json.loads(param_match.group(1))
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse parameters as JSON: {param_match.group(1)}")
+                
+                elif 'Function call' in message:
+                    match = re.search(r'Function call: (\w+)', message)
+                    if match:
+                        function_name = match.group(1)
+                        
+                    # Try to extract parameters
+                    param_match = re.search(r'args: ({.*})', message)
+                    if param_match:
+                        try:
+                            parameters = json.loads(param_match.group(1))
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse parameters as JSON: {param_match.group(1)}")
+                
+                # Add to function calls if we found a function name
+                if function_name:
+                    function_calls.append({
+                        'timestamp': timestamp,
+                        'function_name': function_name,
+                        'parameters': parameters,
+                        'raw_message': message
+                    })
+            
+            logger.info(f"Extracted {len(function_calls)} function calls")
+            return function_calls
+            
+        except Exception as e:
+            logger.error(f"Error extracting function calls: {e}")
+            return []
+
 def main():
     parser = argparse.ArgumentParser(description="Test audio streaming via WebSocket")
     
     # Add arguments
-    parser.add_argument("--audio", required=True, help="Path to audio file to stream")
-    parser.add_argument("--user", default=None, help="User ID (optional)")
-    parser.add_argument("--password", default=None, help="Password for Cognito authentication (optional)")
-    parser.add_argument("--url", default=None, help="WebSocket server URL (optional)")
+    parser.add_argument("--audio", nargs='+', required=True, help="Path to one or more audio files or directories containing audio files to stream")
+    parser.add_argument("--user", default=None, help=f"User ID (default: {ENV_COGNITO_EMAIL} environment variable)")
+    parser.add_argument("--password", default=None, help=f"Password for Cognito authentication (default: {ENV_COGNITO_PASSWORD} environment variable)")
+    parser.add_argument("--url", default=None, help=f"WebSocket server URL (default: {ENV_SERVER_URL} environment variable)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--client-id", default=None, help="Client ID for WebSocket connection (optional)")
     parser.add_argument("--token", default=None, help="Authentication token (optional)")
     parser.add_argument("--validate-only", action="store_true", help="Only validate audio file format, don't run streaming test")
+    parser.add_argument("--delay", type=float, default=2.0, help="Delay in seconds between tests when running multiple files (default: 2.0)")
+    parser.add_argument("--runs", type=int, default=10, help="Number of times to run the test loop (default: 10)")
+    parser.add_argument("--run-delay", type=float, default=5.0, help="Delay in seconds between test loop runs (default: 5.0)")
+    parser.add_argument("--output-dir", default="responses/model_sonic", help="Directory to save responses to (default: responses/model_sonic)")
     
     args = parser.parse_args()
     
+    # Use environment variables if command-line arguments are not provided
+    user_id = args.user or os.environ.get(ENV_COGNITO_EMAIL)
+    password = args.password or os.environ.get(ENV_COGNITO_PASSWORD)
+    server_url = args.url or os.environ.get(ENV_SERVER_URL)
+    
+    # Process audio paths - expand directories to individual files
+    audio_files = []
+    for path in args.audio:
+        if os.path.isdir(path):
+            # If path is a directory, find all audio files in it
+            logger.info(f"Processing directory: {path}")
+            for file in os.listdir(path):
+                file_path = os.path.join(path, file)
+                if os.path.isfile(file_path) and file.lower().endswith(('.raw', '.pcm', '.wav', '.mp3')):
+                    audio_files.append(file_path)
+            logger.info(f"Found {len(audio_files)} audio files in directory: {path}")
+        elif os.path.isfile(path):
+            # If path is a file, add it directly
+            audio_files.append(path)
+        else:
+            logger.error(f"Path not found: {path}")
+    
+    if not audio_files:
+        logger.error("No valid audio files found")
+        return
+    
     try:
-        # If validate-only mode, just check the audio file
+        # If validate-only mode, just check the audio files
         if args.validate_only:
-            print(f"Validating audio file: {args.audio}")
-            client = NovaAsyncClient(debug=args.debug)
-            
-            # Check if file exists first
-            if not os.path.exists(args.audio):
-                print(f"❌ Error: File not found: {args.audio}")
-                return
-            
-            # Analyze the audio file
-            analysis = client.analyze_audio_file(args.audio)
-            print(f"\n📊 Audio File Analysis:")
-            print(f"   File: {args.audio}")
-            print(f"   Type: {analysis.get('file_type', 'unknown')}")
-            print(f"   Size: {analysis.get('file_size', 0)} bytes")
-            
-            if 'error' in analysis:
-                print(f"❌ Error: {analysis['error']}")
-                return
-            
-            # For raw/pcm files, also run format validation
-            file_ext = os.path.splitext(args.audio)[1].lower()
-            if file_ext in ['.raw', '.pcm']:
-                validation = client.validate_raw_audio_format(args.audio)
-                print(f"\n🔍 Raw Audio Format Validation:")
+            for audio_file in audio_files:
+                print(f"\n{'='*60}")
+                print(f"Validating audio file: {audio_file}")
+                print(f"{'='*60}")
                 
-                if validation.get('valid', False):
-                    print("✅ Format validation: PASSED")
-                    print(f"   Duration: {validation['duration_seconds']:.2f} seconds")
-                    print(f"   Samples: {validation['num_samples']:,}")
-                    print(f"   Range: {validation['min_value']} to {validation['max_value']}")
-                    print(f"   Mean: {validation['mean_value']:.2f}")
-                    print(f"   Std Dev: {validation['std_deviation']:.2f}")
+                client = NovaAsyncClient(debug=args.debug)
+                
+                # Check if file exists first
+                if not os.path.exists(audio_file):
+                    print(f"❌ Error: File not found: {audio_file}")
+                    continue
+                
+                # Analyze the audio file
+                analysis = client.analyze_audio_file(audio_file)
+                print(f"\n📊 Audio File Analysis:")
+                print(f"   File: {audio_file}")
+                print(f"   Type: {analysis.get('file_type', 'unknown')}")
+                print(f"   Size: {analysis.get('file_size', 0)} bytes")
+                
+                if 'error' in analysis:
+                    print(f"❌ Error: {analysis['error']}")
+                    continue
+                
+                # For raw/pcm files, also run format validation
+                file_ext = os.path.splitext(audio_file)[1].lower()
+                if file_ext in ['.raw', '.pcm']:
+                    validation = client.validate_raw_audio_format(audio_file)
+                    print(f"\n🔍 Raw Audio Format Validation:")
                     
-                    if 'info' in validation:
-                        print(f"ℹ️  Info: {validation['info']}")
-                    if 'warning' in validation:
-                        print(f"⚠️  Warning: {validation['warning']}")
+                    if validation.get('valid', False):
+                        print("✅ Format validation: PASSED")
+                        print(f"   Duration: {validation['duration_seconds']:.2f} seconds")
+                        print(f"   Samples: {validation['num_samples']:,}")
+                        print(f"   Range: {validation['min_value']} to {validation['max_value']}")
+                        print(f"   Mean: {validation['mean_value']:.2f}")
+                        print(f"   Std Dev: {validation['std_deviation']:.2f}")
+                        
+                        if 'info' in validation:
+                            print(f"ℹ️  Info: {validation['info']}")
+                        if 'warning' in validation:
+                            print(f"⚠️  Warning: {validation['warning']}")
+                    else:
+                        print("❌ Format validation: FAILED")
+                        print(f"   Error: {validation.get('error', 'Unknown error')}")
+                        if 'warning' in validation:
+                            print(f"   Warning: {validation['warning']}")
                 else:
-                    print("❌ Format validation: FAILED")
-                    print(f"   Error: {validation.get('error', 'Unknown error')}")
-                    if 'warning' in validation:
-                        print(f"   Warning: {validation['warning']}")
-            else:
-                # For other formats, show what we detected
-                if 'duration' in analysis:
-                    print(f"   Duration: {analysis['duration']:.2f} seconds")
-                if 'channels' in analysis:
-                    print(f"   Channels: {analysis['channels']}")
-                if 'framerate' in analysis:
-                    print(f"   Sample Rate: {analysis['framerate']} Hz")
-                if 'sample_width_bits' in analysis:
-                    print(f"   Bit Depth: {analysis['sample_width_bits']} bits")
-                    
-            print(f"\n💡 For S2S streaming, audio should be:")
-            print(f"   - 16 kHz sample rate")
-            print(f"   - 16-bit signed PCM")
-            print(f"   - Mono (1 channel)")
-            print(f"   - Little-endian byte order")
+                    # For other formats, show what we detected
+                    if 'duration' in analysis:
+                        print(f"   Duration: {analysis['duration']:.2f} seconds")
+                    if 'channels' in analysis:
+                        print(f"   Channels: {analysis['channels']}")
+                    if 'framerate' in analysis:
+                        print(f"   Sample Rate: {analysis['framerate']} Hz")
+                    if 'sample_width_bits' in analysis:
+                        print(f"   Bit Depth: {analysis['sample_width_bits']} bits")
+                        
+                print(f"\n💡 For S2S streaming, audio should be:")
+                print(f"   - 16 kHz sample rate")
+                print(f"   - 16-bit signed PCM")
+                print(f"   - Mono (1 channel)")
+                print(f"   - Little-endian byte order")
             
             return
         
-        # Run the full test
-        asyncio.run(run_test(
-            audio_path=args.audio,
-            user_id=args.user,
-            server_url=args.url,
-            debug=args.debug,
-            client_id=args.client_id,
-            password=args.password
-        ))
+        # Create the responses directory if it doesn't exist
+        os.makedirs("./responses", exist_ok=True)
+        
+        if args.runs > 1:
+            # Run multiple test loops
+            print(f"Running {args.runs} test loops with {len(audio_files)} audio files")
+            print(f"Delay between tests: {args.delay}s, Delay between runs: {args.run_delay}s")
+            asyncio.run(run_multiple_test_loops(
+                audio_files=audio_files,
+                num_runs=args.runs,
+                user_id=user_id,
+                server_url=server_url,
+                debug=args.debug,
+                password=password,
+                delay_between_tests=args.delay,
+                delay_between_runs=args.run_delay
+            ))
+        elif len(audio_files) > 1:
+            # Run a single test loop for multiple files
+            print(f"Running tests for {len(audio_files)} audio files with {args.delay}s delay between tests")
+            asyncio.run(run_test_loop(
+                audio_files=audio_files,
+                user_id=user_id,
+                server_url=server_url,
+                debug=args.debug,
+                password=password,
+                delay_between_tests=args.delay
+            ))
+        else:
+            # Run a single test
+            print(f"Running test for audio file: {audio_files[0]}")
+            asyncio.run(run_test(
+                audio_path=audio_files[0],
+                user_id=user_id,
+                server_url=server_url,
+                debug=args.debug,
+                client_id=args.client_id,
+                password=password,
+                output_dir=args.output_dir
+            ))
     except KeyboardInterrupt:
         print("\nTest stopped by user")
     except Exception as e:
@@ -1920,4 +2499,4 @@ def main():
             traceback.print_exc()
 
 if __name__ == "__main__":
-    main() 
+    main()

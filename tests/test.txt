@@ -1,6 +1,0 @@
-python s2s_test_harness.py \
-  --audio './audio_samples/1_whatismyschedule.raw' \
-  --user 'huthmac@amazon.com' \
-  --password 'Amazon2025!' \
-  --url 'https://backend.retail.huthmac.people.amazon.dev/ws' \
-  --debug

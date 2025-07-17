@@ -42,6 +42,7 @@ export class StorageStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      enforceSSL: true, // Enforce SSL to comply with security requirements
       lifecycleRules: [
         {
           id: 'DeleteOldAccessLogs',
@@ -90,6 +91,7 @@ export class StorageStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY, // NOT recommended for production
       autoDeleteObjects: true, // NOT recommended for production
+      enforceSSL: true, // Enforce SSL to comply with security requirements
       serverAccessLogsBucket: accessLogsBucket,
       serverAccessLogsPrefix: 'website-access-logs/',
     });
@@ -107,10 +109,12 @@ export class StorageStack extends cdk.Stack {
       defaultBehavior: {
         origin: new origins.S3Origin(this.websiteBucket),
         cachePolicy: CacheDisabledPolicy,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS, // Force HTTPS
       },
       defaultRootObject: 'index.html',
       domainNames: [`${domainName}`],
       certificate: acm.Certificate.fromCertificateArn(this, `${resourcePrefix}-ImportedCertificate`, certificateArn),
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021, // Set minimum TLS version
     });
 
     // Create the S3 bucket policy after the CloudFront distribution
@@ -181,6 +185,7 @@ export class StorageStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      enforceSSL: true, // Enforce SSL to comply with security requirements
       serverAccessLogsBucket: accessLogsBucket,
       serverAccessLogsPrefix: 'data-access-logs/',
     });
@@ -357,4 +362,3 @@ export class StorageStack extends cdk.Stack {
     });
   }
 }
-

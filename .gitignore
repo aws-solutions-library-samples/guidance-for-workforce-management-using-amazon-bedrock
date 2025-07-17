@@ -6,6 +6,8 @@
 /source/frontend/.env
 /deployment/*.json
 
+/source/frontend/src/cdk-outputs.json
+
 # Python virtual environments
 venv/
 env/

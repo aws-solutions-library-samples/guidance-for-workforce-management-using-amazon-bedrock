@@ -1,10 +1,12 @@
 import * as cdk from "aws-cdk-lib";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as bedrock from "aws-cdk-lib/aws-bedrock";
 import { Construct } from "constructs";
+import * as path from "path";
 
 export interface OpenSearchStackProps extends cdk.StackProps {
   resourcePrefix: string;
@@ -23,169 +25,13 @@ export class OpenSearchStack extends cdk.Stack {
     const resourcePrefix = props.resourcePrefix;
     const dataBucket = props.dataBucket;
 
-    // Create Lambda function to set up layers
-    const layersSetupFunction = new lambda.Function(this, `${resourcePrefix}-LayersSetupFunction`, {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.lambda_handler',
-      code: lambda.Code.fromInline(`
-import json
-import boto3
-import os
-import cfnresponse
-import string
-import random
-import urllib3
-import shutil
-import time
-import botocore
-from botocore.exceptions import ClientError
-        
-def download_public_files(src,tgt):
-    http = urllib3.PoolManager()
-    with open("/tmp/"+tgt, 'wb') as out:
-      r = http.request('GET', src, preload_content=False)
-      shutil.copyfileobj(r, out)
-    return "Files Downloaded Locally"
-
-def empty_bucket(bucket_name,region_name):
-    try:
-      s3 = boto3.resource('s3')
-      bucket = s3.Bucket(bucket_name)
-      bucket.objects.all().delete()  
-      
-    except Exception as e:
-      print(str(e))
-    return "Bucket {} Emptied ".format(bucket_name)                            
-
-def provision_s3_dirs(bucket_name,region_name,ret_dict):
-    print("BUCKET NAME IS "+bucket_name)
-    
-    s3 = boto3.client('s3')
-    try:
-      s3.put_object(Bucket=bucket_name, Key=("code/"))
-
-    except Exception as e:
-      print(str(e))
-    
-    try:
-        assets3 = boto3.resource('s3')
-        if assets3.Bucket(bucket_name).creation_date is None:
-          if region_name == 'us-east-1' or region_name == 'us-west-2':
-              print('trying to create bucket')
-              assets3.create_bucket(Bucket=bucket_name)
-          else:
-              print('other region')
-              assets3.create_bucket(Bucket=bucket_name,CreateBucketConfiguration={'LocationConstraint':region_name})
-          print("Asset bucket {} doesn't exists, created".format(bucket_name))
-          time.sleep(20)
-          print("End Timed wait after Asset bucket created")
-    except Exception as e:
-        print(str(e))
-    
-    ret_dict["WorkshopBucket"]=bucket_name
-    return ret_dict
-
-def deploy_assets(bucket_name,region_name, ret_dict):
-    print("deploy assets to bucket: "+bucket_name)
-    try:
-        s3_client = boto3.client('s3')
-
-        download_public_files("https://d3q8adh3y5sxpk.cloudfront.net/retail-app/opensearch-lib.zip","opensearch-lib.zip")
-        s3_client.upload_file('/tmp/opensearch-lib.zip', bucket_name, 'code/opensearch-lib.zip')
-
-        download_public_files("https://d3q8adh3y5sxpk.cloudfront.net/retail-app/requests-aws4auth-lib.zip","awsauth-lib.zip")
-        s3_client.upload_file('/tmp/awsauth-lib.zip', bucket_name, 'code/awsauth-lib.zip')
-
-        download_public_files("https://d3q8adh3y5sxpk.cloudfront.net/retail-app/anycompany-sop.txt","anycompany-sop.txt")
-        s3_client.upload_file('/tmp/anycompany-sop.txt', bucket_name, 'app/anycompany-sop.txt')
-
-    except Exception as e:
-      print("Failed provisioning assets "+str(e))
-    
-    return ret_dict      
-
-def handle_delete(bucket_name,region_name):
-    dict_return={}
-    dict_return["Data"]="delete"
-    empty_bucket(bucket_name,region_name)  
-    
-    return dict_return  
-
-def handle_create(bucket_name,region_name):
-    print('start handle create')
-    dict_return={}
-    dict_return=provision_s3_dirs(bucket_name,region_name,dict_return)
-    dict_return=deploy_assets(bucket_name,region_name, dict_return)
-    
-    return dict_return
-
-def lambda_handler(event, context):
-    response_ = cfnresponse.SUCCESS
-    print(str(event))
-    return_dict={}
-    physical_resourceId = ''.join(random.choices(string.ascii_lowercase +string.digits, k=7))
-    
-    try:
-        account_id = context.invoked_function_arn.split(":")[4]
-        region_name = context.invoked_function_arn.split(":")[3]
-        
-        bucket_arg = str(os.environ['BUCKET'])
-        
-        request_type = str(event.get("RequestType",""))
-        print('picked up event: '+ str(request_type))
-        if request_type=='Create':
-            return_dict = handle_create(bucket_arg,region_name)
-        elif request_type =='Delete':
-            return_dict = handle_delete(bucket_arg,region_name)
-        else:
-            return_dict = {}
-            return_dict["Data"] = "testupdate"
-    except Exception as e:
-      return_dict['Data'] = str(e)
-      response_ = cfnresponse.FAILED
-    cfnresponse.send(event,context,response_,return_dict,physical_resourceId)
-`),
-      timeout: cdk.Duration.minutes(15),
-      memorySize: 128,
-      ephemeralStorageSize: cdk.Size.mebibytes(512),
-      environment: {
-        BUCKET: dataBucket.bucketName,
-      },
-      initialPolicy: [
-        new iam.PolicyStatement({
-          actions: ['s3:*'],
-          resources: [dataBucket.arnForObjects('*'), dataBucket.bucketArn]
-        })
-      ]
+    // Deploy SOP document from local file to S3
+    const sopDeployment = new s3deploy.BucketDeployment(this, `${resourcePrefix}-SOPDeployment`, {
+      sources: [s3deploy.Source.asset(path.join(__dirname, '../../../source/data'))],
+      destinationBucket: dataBucket,
+      destinationKeyPrefix: 'app',
+      prune: false, // Don't delete files that aren't in the source
     });
-
-    // Create custom resource to enable layers
-    const enableLayers = new cdk.CustomResource(this, `${resourcePrefix}-EnableLayers`, {
-      serviceToken: layersSetupFunction.functionArn,
-    });
-
-    // Create Lambda layers
-    const openSearchLayer = new lambda.LayerVersion(this, `${resourcePrefix}-OpenSearchLayer`, {
-      code: lambda.Code.fromBucket(dataBucket, 'code/opensearch-lib.zip'),
-      description: 'opensearch-py layer',
-      compatibleRuntimes: [
-        lambda.Runtime.PYTHON_3_12,
-      ],
-      layerVersionName: 'OpenSearchLayer',
-    });
-
-    const authLayer = new lambda.LayerVersion(this, `${resourcePrefix}-AuthLayer`, {
-      code: lambda.Code.fromBucket(dataBucket, 'code/awsauth-lib.zip'),
-      description: 'awsauthlayer',
-      compatibleRuntimes: [
-        lambda.Runtime.PYTHON_3_12,
-      ],
-      layerVersionName: 'AuthLayer',
-    });
-
-    // Add dependencies to ensure layers are created after files are uploaded
-    openSearchLayer.node.addDependency(enableLayers);
-    authLayer.node.addDependency(enableLayers);
 
     // Create OpenSearch Serverless collection
     this.collection = new opensearchserverless.CfnCollection(this, `${resourcePrefix}-Collection`, {
@@ -325,7 +171,6 @@ def lambda_handler(event, context):
         ],
         Principal: [
           bedrockKnowledgeBaseRole.roleArn,
-          layersSetupFunction.role!.roleArn,
           `arn:aws:sts::${cdk.Stack.of(this).account}:assumed-role/Admin/*`
         ]
       }])
@@ -486,6 +331,9 @@ def handler(event, context):
         }
       }
     });
+    
+    // Ensure data source is created after SOP file is deployed to S3
+    this.dataSource.node.addDependency(sopDeployment);
 
     // Create a dedicated IAM role for the trigger sync Lambda function
     const triggerSyncRole = new iam.Role(this, `${resourcePrefix}-TriggerSyncRole`, {
@@ -602,4 +450,4 @@ def handler(event, context):
       exportName: `${resourcePrefix}-KnowledgeBaseId`
     });
   }
-} 
+}

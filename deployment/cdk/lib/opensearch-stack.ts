@@ -207,6 +207,11 @@ export class OpenSearchStack extends cdk.Stack {
     const opensearchIndex = new opensearchserverless.CfnIndex(this, `${resourcePrefix}-Index`, {
       collectionEndpoint: this.collection.attrCollectionEndpoint,
       indexName: `${resourcePrefix}-sop`,
+      settings: {
+        index: {
+          knn: true  // Enable KNN capability at the index level
+        }
+      },
       mappings: {
         properties: {
           vector: {

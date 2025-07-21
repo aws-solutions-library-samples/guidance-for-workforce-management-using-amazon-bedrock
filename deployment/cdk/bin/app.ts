@@ -52,8 +52,7 @@ const email = emailAddress as string;
 // Common tags for all stacks
 const commonTags = {
   Project: stackName,
-  Environment: envName,
-
+  Environment: envName
 };
 
 // Create infrastructure stack (VPC)
@@ -61,7 +60,7 @@ const infraStack = new InfrastructureStack(app, `${stackName}InfraStack`, {
   env,
   resourcePrefix: stackName,
   terminationProtection: false,
-  description: 'Core infrastructure resources including VPC and networking'
+  description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - Core infrastructure resources including VPC and networking'
 });
 // Add tags
 cdk.Tags.of(infraStack).add('Component', 'Infrastructure');
@@ -78,7 +77,7 @@ const storageStack = new StorageStack(app, `${stackName}StorageStack`, {
   certificateArn: webCertArn,
   parentDomainName: parentDomain,
   terminationProtection: false,
-  description: 'Storage resources including S3 buckets and DynamoDB tables'
+  description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - Storage resources including S3 buckets and DynamoDB tables'
 });
 // Add tags
 cdk.Tags.of(storageStack).add('Component', 'Storage');
@@ -93,7 +92,7 @@ const authStack = new AuthStack(app, `${stackName}AuthStack`, {
   environment: envName,
   emailAddress: email,
   terminationProtection: false, 
-  description: 'Authentication resources including Cognito user pools'
+  description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - Authentication resources including Cognito user pools'
 });
 // Add tags
 cdk.Tags.of(authStack).add('Component', 'Authentication');
@@ -110,7 +109,7 @@ const eksStack = new EksStack(app, `${stackName}EksStack`, {
   domainName,
   certificateArn,
   dataBucket: storageStack.dataBucket,
-  description: 'EKS cluster and backend resources'
+  description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - EKS cluster and backend resources'
 });
 // Add tags
 cdk.Tags.of(eksStack).add('Component', 'EKS');
@@ -124,7 +123,7 @@ const openSearchStack = new OpenSearchStack(app, `${stackName}OpenSearchStack`, 
   resourcePrefix: stackName,
   environment: envName,
   dataBucket: storageStack.dataBucket,
-  description: 'OpenSearch and Bedrock knowledge base resources'
+  description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - OpenSearch and Bedrock knowledge base resources'
 });
 // Add tags
 cdk.Tags.of(openSearchStack).add('Component', 'Search');

@@ -7,6 +7,7 @@
 /deployment/*.json
 
 /source/frontend/src/cdk-outputs.json
+/deployment/cdk/cdk.context.json
 
 # Python virtual environments
 venv/
@@ -131,3 +132,4 @@ public
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+~/Documents/AWS/00_workspace/set_aws_credentials.sh

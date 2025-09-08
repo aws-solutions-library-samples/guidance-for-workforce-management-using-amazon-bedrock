@@ -20,10 +20,12 @@ ENV/
 __pycache__/
 .Python
 *.pptx
+*.pdf
 *.xlsx
 
 #test results
 tests/responses/
+tests/evaluation_results/
 
 # Production
 /build

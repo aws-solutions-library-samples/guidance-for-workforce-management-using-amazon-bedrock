@@ -42,6 +42,7 @@ from pydub import AudioSegment
 from difflib import SequenceMatcher
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from datetime import datetime, timedelta
+from botocore.exceptions import ClientError
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
@@ -149,6 +150,144 @@ class TokenUsage(BaseModel):
     output_speech_tokens: Optional[int] = None
     output_text_tokens: Optional[int] = None
 
+class ObservabilitySpan(BaseModel):
+    """CloudWatch GenAI Observability span information"""
+    span_id: Optional[str] = None
+    parent_span_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    name: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    duration_ms: Optional[float] = None
+    attributes: Optional[Dict[str, Any]] = None
+    events: Optional[List[Dict[str, Any]]] = None
+    status: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+def query_cloudwatch_genai_observability(
+    session_id: str,
+    service_name: str = 'retail-agent',
+    hours_back: int = 24,
+    log_group_name: str = 'aws/spans',
+    region_name: str = 'us-east-1',
+    max_wait_time: int = 300,
+    poll_interval: int = 10,
+    limit: int = 100
+) -> Dict[str, Any]:
+    """
+    Query CloudWatch GenAI Observability for spans related to a specific session ID.
+    
+    Args:
+        service_name: Service name to filter by
+        session_id: Session identifier to filter by
+        hours_back: How many hours back to search (default: 24)
+        log_group_name: CloudWatch Logs group name (default: 'aws/spans')
+        region_name: AWS region (default: 'us-east-1')
+        limit: Maximum number of results to return (default: 100)
+        
+    Returns:
+        List of spans related to the session ID
+    """
+
+    try:
+
+        # Calculate time range
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=hours_back)
+        
+        
+        logger.info(f"Searching for transactions with service {service_name} and session {session_id}")
+        logger.info(f"Time range: {start_time} to {end_time}")
+       
+        # Initialize CloudWatch Logs client
+        logs_client = boto3.client('logs', region_name=region_name)
+    
+    
+        # Step 1: Construct the query
+        # Filter by service name and session ID
+        query = f"""
+        fields @timestamp, @message, @logStream, @log
+        | filter attributes.aws.local.service = "{service_name}"
+        | filter attributes.session.id = "{session_id}"
+        | sort @timestamp desc
+        | limit {limit}
+        """
+        
+        logger.info(f"Starting CloudWatch Logs query for service {service_name} and session {session_id} with the startTime {int(start_time.timestamp())} and endTime {int(end_time.timestamp())}")
+        logger.info(f"Query time range: {start_time} to {end_time}")
+        
+        # Adjust start time to go 6 hours prior to the provided start time
+        adjusted_start_time = start_time - timedelta(hours=6)
+        logger.info(f"Adjusted query time range: {adjusted_start_time} to {end_time}")
+        
+        # Step 2: Start the query
+        start_response = logs_client.start_query(
+            logGroupName=log_group_name,
+            startTime=int(adjusted_start_time.timestamp()),
+            endTime=int(end_time.timestamp()),
+            queryString=query
+        )
+        
+        query_id = start_response['queryId']
+        logger.debug(f"Query started with ID: {query_id}")
+        
+        # Step 3: Poll for query completion
+        elapsed_time = 0
+        while elapsed_time < max_wait_time:
+            logger.debug(f"Checking query status... (elapsed: {elapsed_time}s)")
+            
+            results_response = logs_client.get_query_results(
+                queryId=query_id
+            )
+            
+            query_status = results_response['status']
+            logger.debug(f"Current status: {query_status}")
+            
+            if query_status == 'Complete':
+                # Step 4: Process and return the results
+                results = results_response.get('results', [])
+                
+                # Process results into a more usable format
+                processed_transactions = []
+                for result in results:
+                    # Convert the list of field/value pairs into a dictionary
+                    transaction = {}
+                    for field in result:
+                        transaction[field['field']] = field['value']
+                    
+                    processed_transactions.append(transaction)
+                
+                result = {
+                    'service_name': service_name,
+                    'session_id': session_id,
+                    'transactions': processed_transactions,
+                    'query_status': query_status,
+                    'query_id': query_id,
+                    'metadata': {
+                        'total_transactions': len(processed_transactions),
+                        'query_duration_seconds': elapsed_time,
+                        'statistics': results_response.get('statistics', {})
+                    }
+                }
+                
+                logger.debug(f"Successfully retrieved {len(processed_transactions)} transactions")
+                
+                return result
+                
+            elif query_status in ['Failed', 'Cancelled', 'Timeout']:
+                raise Exception(f"CloudWatch Logs query failed with status: {query_status}")
+            
+            # Status is Scheduled or Running, continue polling
+            time.sleep(poll_interval)
+            elapsed_time += poll_interval
+        
+        raise Exception(f"CloudWatch Logs query timed out after {max_wait_time} seconds")
+        
+    except Exception as e:
+        logger.error(f"Error searching CloudWatch Logs for service {service_name} and session {session_id}: {str(e)}")
+        raise
+    
 
 def find_dotenv():
     """
@@ -298,6 +437,36 @@ def process_responses_file(responses_file: str) -> List[Dict[str, Any]]:
                         'output_text_tokens': text_tokens_output
                     }
                     
+                    # Extract session_id from the record or from text_responses
+                    session_id = record.get('session_id')
+                    
+                    # If session_id is not directly in the record, try to extract it from text_responses
+                    if not session_id and isinstance(text_responses, str):
+                        # Try to find session_id in the text_responses
+                        session_id_match = re.search(r'"session_id":\s*"([^"]+)"', text_responses)
+                        if session_id_match:
+                            session_id = session_id_match.group(1)
+                        else:
+                            # Try to parse text_responses as JSON and look for session_id
+                            try:
+                                # If text_responses is a JSON string, try to parse it
+                                json_data = json.loads(text_responses)
+                                if isinstance(json_data, dict) and 'session_id' in json_data:
+                                    session_id = json_data['session_id']
+                                elif isinstance(json_data, list):
+                                    # If it's a list, check each item for session_id
+                                    for item in json_data:
+                                        if isinstance(item, dict) and 'session_id' in item:
+                                            session_id = item['session_id']
+                                            break
+                            except json.JSONDecodeError:
+                                # Not valid JSON, continue with other extraction methods
+                                pass
+                    
+                    # If we still don't have a session_id, check if it's in the run data
+                    if not session_id and isinstance(run, dict) and 'session_id' in run:
+                        session_id = run['session_id']
+                    
                     # Create response data dictionary
                     response_data = {
                         'input_file_path': input_file_path,
@@ -305,8 +474,43 @@ def process_responses_file(responses_file: str) -> List[Dict[str, Any]]:
                         'output_file_path': output_file_path,
                         'duration_seconds': duration_seconds,
                         'token_usage': token_usage,
-                        'run': run
+                        'run': run,
+                        'session_id': session_id
                     }
+                    
+                    # If we have a session_id, query CloudWatch GenAI Observability for spans
+                    if session_id:
+                        logger.info(f"Found session_id: {session_id}, querying CloudWatch GenAI Observability")
+                        cloudwatch_result = query_cloudwatch_genai_observability(session_id)
+
+                        logger.info(f"\nCloudWatch Results for session {session_id}:")
+                        logger.info(f"Status: {cloudwatch_result['query_status']}")
+                        logger.info(f"Total transactions: {cloudwatch_result['metadata'].get('total_transactions', 0)}")
+                        
+                        spans = []
+                        # Process individual transactions
+                        for i, transaction in enumerate(cloudwatch_result['transactions']):
+                            logger.info(f"\nTransaction {i+1}:")
+                            for key, value in transaction.items():
+                                logger.info(f"  {key}: {value}")
+                                
+                                # Parse the @message field if it exists
+                                if key == '@message':
+                                    try:
+                                        # Parse the JSON message
+                                        message_json = json.loads(value)
+                                        # Check if the name field is "toolUse"
+                                        if message_json.get('name') == 'toolUse':
+                                            logger.info(f"  - Found toolUse transaction, adding transaction")
+                                            # Add the parsed JSON to spans
+                                            spans.append(message_json)
+                                    except json.JSONDecodeError as e:
+                                        logger.warning(f"  - Failed to parse @message as JSON: {e}")
+
+
+                        if spans:
+                            response_data['tool_spans'] = spans
+                            logger.info(f"  - Added {len(spans)} tool spans")
                     
                     # Add to responses list
                     responses.append(response_data)
@@ -350,6 +554,7 @@ def load_validation_dataset(dataset_path: str) -> Dict[str, Dict[str, str]]:
                 if audio_file:
                     validation_data[audio_file] = {
                         'expected_user_input': entry.get('expected_transcription', 'unknown'),
+                        'expected_function': entry.get('expected_function', 'unknown'),
                         'expected_response': entry.get('expected_response', ''),
                         'category': entry.get('category', 'Unknown')
                     }
@@ -628,7 +833,8 @@ class LLMJudge:
                          text_response: str, 
                          output_file_path: Optional[str] = None,
                          audio_features: Optional[Dict[str, Any]] = None,
-                         transcription: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         transcription: Optional[Dict[str, Any]] = None,
+                         tool_spans: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Evaluate a single speech-to-speech interaction.
         
@@ -638,6 +844,7 @@ class LLMJudge:
             output_file_path: Path to the output audio file (optional)
             audio_features: Pre-extracted audio features (optional)
             transcription: Transcription results (optional)
+            tool_spans: CloudWatch GenAI tool spans (optional)
             
         Returns:
             Dict containing evaluation scores and rationale
@@ -646,23 +853,16 @@ class LLMJudge:
         input_file_name = os.path.basename(input_file_path).split('.')[0]
         
         # Determine expected function call, transcription, and response from validation dataset
-        # expected_function = "unknown"
+        expected_function = "unknown"
         expected_user_input = "unknown"
         expected_response = ""
         
         # Look for exact match first
         if input_file_name in self.validation_dataset:
-            # expected_function = self.validation_dataset[input_file_name].get('expected_function', 'unknown')
-            expected_user_input = self.validation_dataset[input_file_name].get('expected_transcription', 'unknown')
+            expected_function = self.validation_dataset[input_file_name].get('expected_function', 'unknown')
+            expected_user_input = self.validation_dataset[input_file_name].get('expected_user_input', 'unknown')
             expected_response = self.validation_dataset[input_file_name].get('expected_response', '')
-        else:
-            # Try partial match if exact match not found
-            for key, data in self.validation_dataset.items():
-                if key in input_file_name:
-                    # expected_function = data.get('expected_function', 'unknown')
-                    expected_user_input = data.get('expected_transcription', 'unknown')
-                    expected_response = data.get('expected_response', '')
-                    break
+        
         
         # Extract audio features if not provided and output file exists
         if output_file_path and not audio_features:
@@ -694,10 +894,15 @@ class LLMJudge:
                 objective_metrics["transcription_similarity"] = transcription_similarity
                 logger.info(f"Transcription similarity: {transcription_similarity:.2f}")
         
+        if tool_spans:
+            logger.debug(f"tool_spans for evaluation: {json.dumps(tool_spans, indent=2)}")
+
         # Create evaluation prompt
         prompt = self._create_evaluation_prompt(
             expected_user_input=expected_user_input,
             user_input=transcription.get("user_input") if transcription else None,
+            expected_function=expected_function,
+            tool_spans=tool_spans,
             expected_response=expected_response,
             assistant_response=transcription.get("assistant_response") if transcription else None
         )
@@ -761,7 +966,9 @@ class LLMJudge:
     
     def _create_evaluation_prompt(self, 
                                 expected_user_input: str = "unknown",
-                                user_input: str = "unknonw",
+                                user_input: str = "unknown",
+                                expected_function: str = "unknown",
+                                tool_spans: Optional[List[Dict[str, Any]]] = None,
                                 expected_response: str= "unknown",
                                 assistant_response: str = "unknown") -> str:
         """
@@ -770,7 +977,9 @@ class LLMJudge:
         Args:
 
             expected_user_input: The expected user input
-            user_input: The user's actual transcribed input 
+            user_input: The user's actual transcribed input
+            expected_function: The expected function call (if any)
+            tool_spans: List of tool spans from CloudWatch GenAI Observability (if any
             expected_response: The expected model response content
             assistant_response: The actual model response content
             audio_features: Extracted audio features from the output audio file (optional)
@@ -780,11 +989,16 @@ class LLMJudge:
             Evaluation prompt string
         """
         criteria_text = "\n".join([f"- {name}: {description}" for name, description in self.evaluation_criteria.items()])        
-                
+
+        if tool_spans:
+            logger.debug(f"tool_spans in create_evaluation_prompt: {json.dumps(tool_spans, indent=2)}")
+
         # Format the prompt template with our extracted values
         prompt = self.prompt_template.format(
             expected_user_input=expected_user_input,
             user_input=user_input,
+            expected_function=expected_function,
+            tool_spans=json.dumps(tool_spans, indent=2) if tool_spans else  "None", 
             expected_response=expected_response,
             transcribed_response=assistant_response,
             criteria_text=criteria_text
@@ -838,6 +1052,81 @@ class LLMJudge:
             return response_body.get('content', [{}])[0].get('text', '')
         else:
             return response_body.get('completion', '')
+    
+    def _extract_span_metrics(self, spans: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Extract key metrics from observability spans.
+        
+        Args:
+            spans: List of observability spans
+            
+        Returns:
+            Dictionary of extracted metrics
+        """
+        metrics = {}
+        
+        try:
+            # Calculate total latency across all spans
+            total_duration_ms = 0
+            for span in spans:
+                if 'duration_ms' in span:
+                    total_duration_ms += span['duration_ms']
+                elif 'duration' in span:
+                    total_duration_ms += span['duration']
+            
+            if total_duration_ms > 0:
+                metrics['total_span_duration_ms'] = total_duration_ms
+            
+            # Extract token counts from spans
+            input_tokens = 0
+            output_tokens = 0
+            
+            for span in spans:
+                # Check for token counts in attributes
+                if 'attributes' in span:
+                    attrs = span['attributes']
+                    if 'input_tokens' in attrs:
+                        input_tokens += int(attrs['input_tokens'])
+                    if 'output_tokens' in attrs:
+                        output_tokens += int(attrs['output_tokens'])
+                    if 'input_token_count' in attrs:
+                        input_tokens += int(attrs['input_token_count'])
+                    if 'output_token_count' in attrs:
+                        output_tokens += int(attrs['output_token_count'])
+            
+            if input_tokens > 0:
+                metrics['span_input_tokens'] = input_tokens
+            if output_tokens > 0:
+                metrics['span_output_tokens'] = output_tokens
+            
+            # Extract model information
+            models = set()
+            for span in spans:
+                if 'attributes' in span and 'model_id' in span['attributes']:
+                    models.add(span['attributes']['model_id'])
+            
+            if models:
+                metrics['models'] = list(models)
+            
+            # Extract error information
+            errors = []
+            for span in spans:
+                if 'status' in span and span['status'].get('code') != 'ok':
+                    errors.append({
+                        'span_id': span.get('span_id'),
+                        'name': span.get('name'),
+                        'status': span['status'],
+                        'error': span.get('error')
+                    })
+            
+            if errors:
+                metrics['errors'] = errors
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error extracting span metrics: {e}")
+            return {}
     
     def _parse_evaluation_result(self, result_text: str) -> Dict[str, Any]:
         """
@@ -908,7 +1197,7 @@ class LLMJudge:
                 "raw_result": result_text[:500] + ("..." if len(result_text) > 500 else "")
             }
 
-def evaluate_responses(responses_file, config_path=DEFAULT_CONFIG_PATH, validation_dataset_path=DEFAULT_VALIDATION_DATASET_PATH):
+def evaluate_responses(responses_file, config_path=DEFAULT_CONFIG_PATH, validation_dataset_path=DEFAULT_VALIDATION_DATASET_PATH, json_summary_file=None):
     """
     Evaluate all responses in the specified file.
     
@@ -916,6 +1205,7 @@ def evaluate_responses(responses_file, config_path=DEFAULT_CONFIG_PATH, validati
         responses_file: Path to the JSONL file containing response data
         config_path: Path to the configuration JSON file
         validation_dataset_path: Path to the validation dataset JSONL file
+        json_summary_file: Path to save JSON evaluation summary (optional)
         
     Returns:
         List of evaluation results
@@ -948,6 +1238,9 @@ def evaluate_responses(responses_file, config_path=DEFAULT_CONFIG_PATH, validati
         
         input_file_path = response.get('input_file_path', '')
         text_responses = response.get('text_responses', '')
+        tool_spans = response.get('tool_spans', [])
+        if tool_spans:
+            logger.debug(f"tool_spans for this response with length {len(tool_spans)}")
         output_file_path = response.get('output_file_path')
         summary_file = response.get('summary_file')
         
@@ -976,7 +1269,8 @@ def evaluate_responses(responses_file, config_path=DEFAULT_CONFIG_PATH, validati
             text_response=text_responses,
             output_file_path=output_file_path,
             audio_features=audio_features,
-            transcription=transcription
+            transcription=transcription,
+            tool_spans=tool_spans
         )
         
         # Add duration_seconds to objective metrics
@@ -995,20 +1289,72 @@ def evaluate_responses(responses_file, config_path=DEFAULT_CONFIG_PATH, validati
         
         results.append(result)
     
-    # Save overall results to the same file path as the responses file
-    with open(responses_file, 'w') as f:
-        json.dump({
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "responses_count": len(responses),
-            "evaluations_count": len(results),
-            "results": results
-        }, f, indent=2)
+    # Process the results to sort them and calculate costs
+    # Load validation dataset for sorting
+    validation_data = {}
+    try:
+        # Load the validation dataset to get categories
+        with open(validation_dataset_path, 'r') as f:
+            for line in f:
+                entry = json.loads(line.strip())
+                audio_file = entry.get('audio_file')
+                category = entry.get('category')
+                if audio_file and category:
+                    validation_data[audio_file] = category
+    except Exception as e:
+        logger.error(f"Error loading validation dataset for sorting: {e}")
     
-    logger.info(f"Saved evaluation results to {responses_file}")
+    # Create a sorting key function
+    def get_sort_key(result):
+        input_file = result.get("input_file", "")
+        audio_name = get_audio_file_name_from_path(input_file)
+        
+        # Get category, defaulting to "Unknown" if not found
+        category = validation_data.get(audio_name, "Unknown")
+        
+        return (category, audio_name)
+    
+    # Sort evaluation results by category and audio file name
+    results.sort(key=get_sort_key)
+    logger.info(f"Sorted {len(results)} evaluation results by category and audio file name")
+    
+    # Calculate total cost across all evaluations
+    total_cost = 0.0
+    for result in results:
+        if "objective_metrics" in result and "cost_usd" in result["objective_metrics"]:
+            total_cost += result["objective_metrics"]["cost_usd"]
+    
+    logger.info(f"Total cost for all evaluations: ${total_cost:.6f}")
+    
+    # Save overall results to JSON summary file
+    if json_summary_file:
+        # Ensure the directory exists
+        summary_dir = os.path.dirname(json_summary_file)
+        if summary_dir and not os.path.exists(summary_dir):
+            try:
+                os.makedirs(summary_dir, exist_ok=True)
+                logger.info(f"Created directory: {summary_dir}")
+            except Exception as e:
+                logger.error(f"Failed to create directory {summary_dir}: {e}")
+        
+        with open(json_summary_file, 'w') as f:
+            json.dump({
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "responses_count": len(responses),
+                "evaluations_count": len(results),
+                "total_cost_usd": total_cost,
+                "results": results,
+                "metadata": {
+                    "contains_duration_seconds": any("objective_metrics" in r and "duration_seconds" in r["objective_metrics"] 
+                                                  for r in results)
+                }
+            }, f, indent=2)
+        
+        logger.info(f"Saved evaluation summary to {json_summary_file}")
     
     return results
 
-def generate_evaluation_report(results, output_file=None, validation_dataset_path=DEFAULT_VALIDATION_DATASET_PATH):
+def generate_evaluation_report(results, output_file=None, validation_dataset_path=DEFAULT_VALIDATION_DATASET_PATH, config_path=DEFAULT_CONFIG_PATH):
     """
     Generate a human-readable evaluation report from the evaluation results.
     
@@ -1016,12 +1362,17 @@ def generate_evaluation_report(results, output_file=None, validation_dataset_pat
         results: List of evaluation results
         output_file: Path to save the report (optional)
         validation_dataset_path: Path to the validation dataset for sorting by category
+        config_path: Path to the configuration JSON file
         
     Returns:
         Report text
     """
     if not results:
         return "No evaluation results to report."
+    
+    # Load configuration to get evaluation criteria
+    config = load_config(config_path)
+    evaluation_criteria = config.get('evaluation_criteria', {}).keys()
     
     # Load validation dataset for sorting
     validation_data = {}
@@ -1051,12 +1402,10 @@ def generate_evaluation_report(results, output_file=None, validation_dataset_pat
     sorted_results = sorted(results, key=get_sort_key)
     results = sorted_results
     
-    # Calculate average scores
-    criteria_scores = {
-        "speech_recognition": [],
-        "response_relevance": [],
-        "response_correctness": [],
-    }
+    # Initialize criteria scores dictionary dynamically from config
+    criteria_scores = {}
+    for criterion in evaluation_criteria:
+        criteria_scores[criterion] = []
     
     overall_scores = []
     
@@ -1118,19 +1467,18 @@ def generate_evaluation_report(results, output_file=None, validation_dataset_pat
         
         if category not in results_by_category:
             results_by_category[category] = []
-            category_scores[category] = {
-                "speech_recognition": [],
-                "response_relevance": [],
-                "response_correctness": [],
-                "overall": []
-            }
+            # Initialize category scores dictionary dynamically from config
+            category_scores[category] = {}
+            for criterion in evaluation_criteria:
+                category_scores[category][criterion] = []
+            category_scores[category]["overall"] = []
         
         results_by_category[category].append(result)
         
         # Collect scores for this category
         if "criteria" in result and "overall" in result:
             # Extract criteria scores for this category
-            for criterion in ["speech_recognition", "response_relevance", "response_correctness"]:
+            for criterion in evaluation_criteria:
                 if criterion in result.get("criteria", {}) and "score" in result["criteria"][criterion]:
                     category_scores[category][criterion].append(result["criteria"][criterion]["score"])
             
@@ -1347,185 +1695,28 @@ def main():
         logger.error(f"Validation dataset not found: {args.validation_dataset}")
         return 1
     
+    # Set default JSON summary file path if not provided
+    if not args.json_summary_file:
+        responses_dir = os.path.dirname(args.responses_file)
+        args.json_summary_file = os.path.join(responses_dir, "evaluation_summary.json")
+    
     # Evaluate responses
     logger.info(f"Evaluating responses in {args.responses_file}")
-    results = process_responses_file(args.responses_file)
+    results = evaluate_responses(
+        args.responses_file, 
+        args.config_file, 
+        args.validation_dataset,
+        args.json_summary_file
+    )
     
-    if results:
-        # Load configuration
-        config = load_config(args.config_file)
-        
-        # Load validation dataset
-        try:
-            validation_dataset = load_validation_dataset(args.validation_dataset)
-        except Exception as e:
-            logger.error(f"Failed to load validation dataset: {e}")
-            return 1
-        
-        # Initialize LLM Judge
-        judge = LLMJudge(config, validation_dataset)
-        
-        # Create directory for results if it doesn't exist
+    # Set default report file path if not provided
+    if not args.report_file:
         responses_dir = os.path.dirname(args.responses_file)
-        
-        # Evaluate each response
-        evaluation_results = []
-        for i, response in enumerate(results, 1):
-            logger.info(f"Evaluating response {i}/{len(results)}")
-            
-            input_file_path = response.get('input_file_path', '')
-            text_responses = response.get('text_responses', '')
-            output_file_path = response.get('output_file_path')
-            summary_file = response.get('summary_file')
-            
-            # Extract audio features if output file exists
-            audio_features = None
-            if output_file_path and os.path.exists(output_file_path):
-                audio_features = extract_audio_features(output_file_path)
-            
-            # Parse text responses to extract user input and assistant responses
-            transcription = None
-            try:
-                transcription = parse_text_responses(text_responses)
-            except Exception as e:
-                logger.error(f"Error parsing text responses: {e}")
-            
-            # Add token usage if available
-            token_usage = None
-            if 'token_usage' in response:
-                token_usage = response['token_usage']
-            
-            # Add latency if available
-            duration_seconds = None
-            if 'duration_seconds' in response:
-                duration_seconds = response['duration_seconds']
-                
-                # Add to objective metrics
-                if duration_seconds is not None:
-                    if not hasattr(response, 'objective_metrics'):
-                        response['objective_metrics'] = {}
-                    response['objective_metrics']['duration_seconds'] = duration_seconds
-            
-            # Evaluate response
-            result = judge.evaluate_response(
-                input_file_path=input_file_path,
-                text_response=text_responses,
-                output_file_path=output_file_path,
-                audio_features=audio_features,
-                transcription=transcription
-            )
-            
-            # Add summary file path
-            result['summary_file'] = summary_file
-            
-            # Add token usage if available
-            if token_usage:
-                result['token_usage'] = token_usage
-                
-                # Calculate cost based on token usage
-                cost = calculate_cost(token_usage)
-                
-                # Add cost to objective metrics
-                if "objective_metrics" not in result:
-                    result["objective_metrics"] = {}
-                result["objective_metrics"]["cost_usd"] = cost
-                
-                logger.info(f"  - Calculated cost: ${cost:.6f}")
-            
-            # Add duration_seconds to objective metrics
-            if duration_seconds is not None:
-                if "objective_metrics" not in result:
-                    result["objective_metrics"] = {}
-                result["objective_metrics"]["duration_seconds"] = duration_seconds
-                logger.info(f"  - Added duration_seconds: {duration_seconds} seconds")
-            
-            # Remove null summary_file field and any other null fields
-            result = remove_null_fields(result)
-            
-            # Get category from validation dataset if not already set
-            if "category" not in result:
-                audio_name = get_audio_file_name_from_path(input_file_path)
-                for key, data in validation_dataset.items():
-                    if key == audio_name or key in audio_name:
-                        result["category"] = data.get("category", "Unknown")
-                        break
-            
-            evaluation_results.append(result)
-        
-        # Load validation dataset for sorting
-        validation_data = {}
-        try:
-            # Load the validation dataset to get categories
-            with open(args.validation_dataset, 'r') as f:
-                for line in f:
-                    entry = json.loads(line.strip())
-                    audio_file = entry.get('audio_file')
-                    category = entry.get('category')
-                    if audio_file and category:
-                        validation_data[audio_file] = category
-        except Exception as e:
-            logger.error(f"Error loading validation dataset for sorting: {e}")
-        
-        # Create a sorting key function
-        def get_sort_key(result):
-            input_file = result.get("input_file", "")
-            audio_name = get_audio_file_name_from_path(input_file)
-            
-            # Get category, defaulting to "Unknown" if not found
-            category = validation_data.get(audio_name, "Unknown")
-            
-            return (category, audio_name)
-        
-        # Sort evaluation results by category and audio file name
-        evaluation_results.sort(key=get_sort_key)
-        logger.info(f"Sorted {len(evaluation_results)} evaluation results by category and audio file name")
-        
-        # Calculate total cost across all evaluations
-        total_cost = 0.0
-        for result in evaluation_results:
-            if "objective_metrics" in result and "cost_usd" in result["objective_metrics"]:
-                total_cost += result["objective_metrics"]["cost_usd"]
-        
-        logger.info(f"Total cost for all evaluations: ${total_cost:.6f}")
-        
-        # Save overall results to JSON summary file
-        json_summary_file = args.json_summary_file
-        if not json_summary_file:
-            json_summary_file = os.path.join(responses_dir, "evaluation_summary.json")
-        
-        # Ensure the directory exists
-        summary_dir = os.path.dirname(json_summary_file)
-        if summary_dir and not os.path.exists(summary_dir):
-            try:
-                os.makedirs(summary_dir, exist_ok=True)
-                logger.info(f"Created directory: {summary_dir}")
-            except Exception as e:
-                logger.error(f"Failed to create directory {summary_dir}: {e}")
-        
-        with open(json_summary_file, 'w') as f:
-            json.dump({
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "responses_count": len(results),
-                "evaluations_count": len(evaluation_results),
-                "total_cost_usd": total_cost,
-                "results": evaluation_results,
-                "metadata": {
-                    "contains_duration_seconds": any("objective_metrics" in r and "duration_seconds" in r["objective_metrics"] 
-                                                  for r in evaluation_results)
-                }
-            }, f, indent=2)
-        
-        logger.info(f"Saved evaluation summary to {json_summary_file}")
-        results = evaluation_results
+        args.report_file = os.path.join(responses_dir, "evaluation_report.md")
     
     # Generate report
-    report_file = args.report_file
-    if not report_file:
-        # Default to evaluation_report.md in the responses directory
-        report_file = os.path.join(responses_dir, "evaluation_report.md")
-    
-    logger.info(f"Generating evaluation report: {report_file}")
-    generate_evaluation_report(results, report_file, args.validation_dataset)
+    logger.info(f"Generating evaluation report: {args.report_file}")
+    generate_evaluation_report(results, args.report_file, args.validation_dataset, args.config_file)
     
     logger.info("Evaluation complete")
     return 0

@@ -5,14 +5,22 @@ This script implements an LLM-as-a-Judge evaluation approach for assessing the q
 of function calling responses from the retail assistant API. It evaluates responses based on
 criteria defined in the configuration file.
 
+It includes:
+- LLM-based evaluation using Amazon Bedrock
+- Function call accuracy assessment
+- Expected response validation from dataset
+- Objective metrics for response accuracy
+
 The script uses:
 - A config JSON file for LLM judge model, evaluation criteria, and prompt template
-- A validation dataset JSONL file for expected function calls
+- A validation dataset JSONL file for expected function calls and responses
+- Amazon Bedrock for LLM-based evaluation
 
 Usage:
-    python llm_judge_function_calling_eval.py --model_name <model_name> --responses_file <path_to_responses_csv>
+    python llm_judge_function_calling_eval.py --responses_file <path_to_responses_csv>
                                              [--config_file <path_to_config_json>]
                                              [--validation_dataset <path_to_validation_jsonl>]
+                                             [--report_file <path_to_report_md>]
 """
 
 import argparse
@@ -95,7 +103,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
             },
             "evaluation_criteria": {
                 "correctness": "Does the response correctly answer the query with accurate information?",
-                "function_call_accuracy": "Was the appropriate function called to retrieve the necessary information?",
                 "relevance": "Is the response directly relevant to the user's query?",
                 "completeness": "Does the response provide all necessary information to fully answer the query?",
                 "clarity": "Is the response clear, well-structured, and easy to understand?"
@@ -349,7 +356,8 @@ def process_responses_file(responses_file: str) -> List[Dict[str, Any]]:
 
 def evaluate_responses_file(responses_file: str, 
                            config_file: str = DEFAULT_CONFIG_PATH,
-                           validation_dataset_file: str = DEFAULT_VALIDATION_DATASET_PATH) -> Tuple[List[Dict[str, Any]], str, str]:
+                           validation_dataset_file: str = DEFAULT_VALIDATION_DATASET_PATH,
+                           report_file: Optional[str] = None) -> Tuple[List[Dict[str, Any]], str, str]:
     """
     Evaluate all responses in a file (supports both CSV and JSONL formats).
     
@@ -357,6 +365,7 @@ def evaluate_responses_file(responses_file: str,
         responses_file: Path to the file containing responses (CSV or JSONL)
         config_file: Path to the configuration JSON file
         validation_dataset_file: Path to the validation dataset JSONL file
+        report_file: Path to save the evaluation report (optional)
         
     Returns:
         Tuple of (list of results, json output path, markdown output path)
@@ -416,7 +425,7 @@ def evaluate_responses_file(responses_file: str,
     # Save results
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     
-    # Save detailed results as JSON
+    # Save detailed results as JSON - use the same directory as responses_file
     json_output_file = os.path.join(responses_dir, f"{model_name}_evaluation_{timestamp}.json")
     with open(json_output_file, 'w') as f:
         json.dump({
@@ -430,8 +439,22 @@ def evaluate_responses_file(responses_file: str,
     logger.info(f"Evaluation complete. Results saved to {json_output_file}")
     
     # Generate and save markdown report
-    md_output_file = os.path.join(responses_dir, f"{model_name}_evaluation_{timestamp}.md")
+    if report_file:
+        md_output_file = report_file
+    else:
+        md_output_file = os.path.join(responses_dir, f"{model_name}_evaluation_{timestamp}.md")
+    
     report = generate_evaluation_report(results, model_name)
+    
+    # Ensure the directory exists
+    md_output_dir = os.path.dirname(md_output_file)
+    if md_output_dir and not os.path.exists(md_output_dir):
+        try:
+            os.makedirs(md_output_dir, exist_ok=True)
+            logger.info(f"Created directory: {md_output_dir}")
+        except Exception as e:
+            logger.error(f"Failed to create directory {md_output_dir}: {e}")
+    
     with open(md_output_file, 'w') as f:
         f.write(report)
     
@@ -619,12 +642,13 @@ def generate_evaluation_report(results: List[Dict[str, Any]], model_name: str = 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate function calling responses using LLM as a Judge")
-    parser.add_argument("--model_name", required=True, help="Name of the model to evaluate")
-    parser.add_argument("--responses_file", required=True, help="Path to the CSV file containing responses")
+    parser.add_argument("--responses_file", required=True, help="Path to the file containing responses (CSV or JSONL)")
     parser.add_argument("--config_file", default=DEFAULT_CONFIG_PATH, 
                         help=f"Path to the configuration JSON file (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--validation_dataset", default=DEFAULT_VALIDATION_DATASET_PATH, 
                         help=f"Path to the validation dataset JSONL file (default: {DEFAULT_VALIDATION_DATASET_PATH})")
+    parser.add_argument("--report_file", default=None,
+                        help="Path to save the evaluation report (optional)")
     
     args = parser.parse_args()
     
@@ -645,7 +669,8 @@ def main():
     results, json_path, md_path = evaluate_responses_file(
         responses_file=args.responses_file,
         config_file=args.config_file,
-        validation_dataset_file=args.validation_dataset
+        validation_dataset_file=args.validation_dataset,
+        report_file=args.report_file
     )
     
     # Display summary

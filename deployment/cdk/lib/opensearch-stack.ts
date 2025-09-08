@@ -270,7 +270,8 @@ def handler(event, context):
         cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
       `),
       timeout: cdk.Duration.minutes(2),
-      memorySize: 128
+      memorySize: 128,
+      loggingFormat: lambda.LoggingFormat.JSON
     });
 
     // Create a custom resource to trigger the delay
@@ -423,7 +424,8 @@ def handler(event, context):
       `),
       timeout: cdk.Duration.minutes(5),
       memorySize: 256,
-      role: triggerSyncRole
+      role: triggerSyncRole,
+      loggingFormat: lambda.LoggingFormat.JSON
     });
     
     // Create a custom resource to trigger the sync job

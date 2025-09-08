@@ -1,241 +1,184 @@
+"""
+Authentication module for validating JWT tokens from AWS Cognito.
+"""
+
 import os
-import time
+import json
+import logging
 import requests
 import jwt
 from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
+from fastapi import HTTPException
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import HTTPException
-import logging
+import boto3
+from botocore.exceptions import ClientError
+import socket
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
+# Configure logging
+logger = logging.getLogger(__name__)
 
-STACK_NAME = os.getenv("STACK_NAME", "backend")
-name = f"{STACK_NAME}-server"
-logger = logging.getLogger(name)
-
-# AWS Cognito configuration
-COGNITO_REGION = os.getenv("COGNITO_REGION", os.getenv("AWS_REGION", "us-east-1"))
-COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID")
-COGNITO_APP_CLIENT_ID = os.getenv("COGNITO_APP_CLIENT_ID")
-
-# Construct Cognito issuer URL
-COGNITO_ISSUER = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}" if COGNITO_USER_POOL_ID else None
-COGNITO_JWKS_URL = f"{COGNITO_ISSUER}/.well-known/jwks.json" if COGNITO_ISSUER else None
-
-# Global JWKS cache
+# Cache for JWKS keys
 jwks_cache = {}
-jwks_cache_expiry = 0
-JWKS_CACHE_DURATION = 3600  # Cache for 1 hour
 
-# JWT validation leeway for clock synchronization issues
-# This addresses "The token is not yet valid (iat)" errors caused by
-# minor clock differences between token issuer and validator
-JWT_LEEWAY_SECONDS = 10
-
-def get_jwks_keys():
+def validate_token(token, user_id=None):
     """
-    Fetch and cache JWKS keys from AWS Cognito.
-    
-    Returns:
-        dict: JWKS keys from Cognito
-    
-    Raises:
-        Exception: If unable to fetch JWKS keys
-    """
-    global jwks_cache, jwks_cache_expiry
-    
-    # Check if we have cached keys that haven't expired
-    current_time = time.time()
-    if jwks_cache and current_time < jwks_cache_expiry:
-        return jwks_cache
-    
-    if not COGNITO_JWKS_URL:
-        raise Exception("Cognito JWKS URL not configured. Set COGNITO_USER_POOL_ID environment variable.")
-    
-    try:
-        logger.info(f"Fetching JWKS from: {COGNITO_JWKS_URL}")
-        response = requests.get(COGNITO_JWKS_URL, timeout=10)
-        response.raise_for_status()
-        
-        jwks_data = response.json()
-        
-        # Cache the keys
-        jwks_cache = jwks_data
-        jwks_cache_expiry = current_time + JWKS_CACHE_DURATION
-        
-        logger.info(f"Successfully cached {len(jwks_data.get('keys', []))} JWKS keys")
-        return jwks_data
-        
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch JWKS: {e}")
-        raise Exception(f"Unable to fetch JWKS keys: {e}")
-
-def get_signing_key(kid: str):
-    """
-    Get the signing key for a specific key ID from JWKS.
+    Validate a JWT token from AWS Cognito.
     
     Args:
-        kid: Key ID from JWT header
-    
+        token: JWT token to validate
+        user_id: Optional user ID to verify against token claims
+        
     Returns:
-        str: PEM-formatted public key
-    
-    Raises:
-        Exception: If key not found or invalid
-    """
-    jwks = get_jwks_keys()
-    
-    # Find the key with matching kid
-    for key in jwks.get('keys', []):
-        if key.get('kid') == kid:
-            # Convert JWK to PEM format
-            if key.get('kty') == 'RSA':
-                # Extract RSA components
-                n = key.get('n')
-                e = key.get('e')
-                
-                if not n or not e:
-                    raise Exception(f"Invalid RSA key components for kid: {kid}")
-                
-                # Decode base64url
-                from base64 import urlsafe_b64decode
-                
-                def base64url_decode(data):
-                    # Add padding if needed
-                    padding = 4 - len(data) % 4
-                    if padding != 4:
-                        data += '=' * padding
-                    return urlsafe_b64decode(data)
-                
-                n_bytes = base64url_decode(n)
-                e_bytes = base64url_decode(e)
-                
-                # Convert to integers
-                n_int = int.from_bytes(n_bytes, byteorder='big')
-                e_int = int.from_bytes(e_bytes, byteorder='big')
-                
-                # Create RSA public key
-                public_numbers = rsa.RSAPublicNumbers(e_int, n_int)
-                public_key = public_numbers.public_key()
-                
-                # Convert to PEM format
-                pem = public_key.public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
-                )
-                
-                return pem.decode('utf-8')
-            else:
-                raise Exception(f"Unsupported key type: {key.get('kty')}")
-    
-    raise Exception(f"No key found for kid: {kid}")
-
-def validate_token(token: str, user_id: str = None) -> dict:
-    """
-    Validate AWS Cognito JWT token with proper signature verification.
-    
-    Args:
-        token: JWT token from AWS Cognito
-        user_id: Optional user ID to cross-validate
-    
-    Returns:
-        dict: User information if valid
-    
+        dict: User information extracted from the token
+        
     Raises:
         HTTPException: If token is invalid or expired
     """
+    
+    # Continue with normal token validation
     if not token:
-        raise HTTPException(status_code=401, detail="Authentication token required")
+        raise HTTPException(status_code=401, detail="Missing authentication token")
     
     
     try:
-        logger.info(f"Validating token: {token}")
-        # Decode header without verification to get kid
-        unverified_header = jwt.get_unverified_header(token)
-        kid = unverified_header.get('kid')
+        # Get Cognito configuration from environment variables
+        user_pool_id = os.environ.get("COGNITO_USER_POOL_ID")
+        app_client_id = os.environ.get("COGNITO_APP_CLIENT_ID")
+        aws_region = os.environ.get("AWS_REGION", "us-east-1")
+        
+        if not user_pool_id or not app_client_id:
+            logger.error("Missing Cognito configuration")
+            raise HTTPException(status_code=500, detail="Authentication service misconfigured")
+        
+        # Get the JWKS URL for the user pool
+        jwks_url = f"https://cognito-idp.{aws_region}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
+        
+        # Fetch JWKS if not in cache
+        if jwks_url not in jwks_cache:
+            logger.info(f"Fetching JWKS from {jwks_url}")
+            response = requests.get(jwks_url)
+            response.raise_for_status()
+            jwks_cache[jwks_url] = response.json()
+        
+        # Get the JWKS
+        jwks = jwks_cache[jwks_url]
+        
+        # Decode the token header to get the key ID
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
         
         if not kid:
-            raise HTTPException(status_code=401, detail="Token missing key ID")
+            raise HTTPException(status_code=401, detail="Invalid token header")
         
-        # Get the signing key for this kid
-        try:
-            signing_key = get_signing_key(kid)
-        except Exception as e:
-            logger.error(f"Failed to get signing key: {e}")
-            raise HTTPException(status_code=401, detail="Unable to verify token signature")
+        # Find the key with matching key ID
+        key = None
+        for jwk in jwks.get("keys", []):
+            if jwk.get("kid") == kid:
+                key = jwk
+                break
+        
+        if not key:
+            raise HTTPException(status_code=401, detail="Token signing key not found")
+        
+        # Construct the public key
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key))
         
         # Verify and decode the token
-        try:
-            decoded_token = jwt.decode(
-                token,
-                signing_key,
-                algorithms=['RS256'],
-                audience=COGNITO_APP_CLIENT_ID,
-                issuer=COGNITO_ISSUER,
-                leeway=JWT_LEEWAY_SECONDS,  # Add leeway for clock synchronization
-                options={
-                    "verify_signature": True,
-                    "verify_aud": True,
-                    "verify_iss": True,
-                    "verify_exp": True,
-                    "verify_iat": True
-                }
-            )
-        except ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token has expired")
-        except InvalidTokenError as e:
-            logger.error(f"Token validation failed: {e}")
-            raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            options={"verify_signature": True},
+            audience=app_client_id,
+            issuer=f"https://cognito-idp.{aws_region}.amazonaws.com/{user_pool_id}"
+        )
         
-        # Validate token_use
-        token_use = decoded_token.get('token_use')
-        if token_use not in ['id', 'access']:
-            raise HTTPException(status_code=401, detail=f"Invalid token_use: {token_use}")
+        # Extract user information from token
+        token_user_id = payload.get("sub")
+        logger.info(f"Token user ID: {token_user_id}")
+        email = payload.get("email", "")
+        logger.info(f"Token email: {email}")
+        username = payload.get("cognito:username", payload.get("preferred_username", token_user_id))
+        logger.info(f"Token username: {username}")
         
-        # Extract user information
-        user_info = {
-            "user_id": decoded_token.get("sub") or decoded_token.get("username"),
-            "email": decoded_token.get("email"),
-            "token_use": token_use,
-            "exp": decoded_token.get("exp"),
-            "iat": decoded_token.get("iat"),
-            "iss": decoded_token.get("iss"),
-            "aud": decoded_token.get("aud"),
-            "cognito_username": decoded_token.get("cognito:username"),
-            "token": token
+        # Verify user ID if provided - check against multiple possible fields
+        if user_id:
+            # The user_id could match the sub, email, or username fields
+            valid_user_ids = [token_user_id, email, username]
+            if user_id not in valid_user_ids:
+                logger.warning(f"User ID mismatch: provided={user_id}, token_sub={token_user_id}, email={email}, username={username}")
+                raise HTTPException(status_code=403, detail="Token does not match provided user ID")
+            else:
+                logger.info(f"User ID {user_id} matches token claims")
+        # Get AWS credentials for the authenticated user
+        aws_credentials = get_aws_credentials_for_user(token)
+        
+        # Return user information
+        return {
+            "user_id": token_user_id,
+            "email": email,
+            "username": username,
+            "aws_credentials": aws_credentials
         }
         
-        # Ensure we have a user_id
-        if not user_info["user_id"]:
-            raise HTTPException(status_code=401, detail="Token missing user identifier")
-        
-        
-        # Cross-validate user ID if provided
-        # If the provided user_id looks like an email, compare with token email
-        # Otherwise compare with token user_id (UUID)
-        if user_id:
-            if "@" in user_id:
-                # Provided user_id is an email, compare with token email
-                token_email = user_info.get("email", "").lower()
-                provided_email = user_id.lower()
-                if token_email != provided_email:
-                    logger.warning(f"Email mismatch: token_email={token_email}, provided_email={provided_email}")
-                    raise HTTPException(status_code=401, detail="Email mismatch")
-            else:
-                # Provided user_id is not an email, compare with token user_id
-                if user_info["user_id"] != user_id:
-                    logger.warning(f"User ID mismatch: token={user_info['user_id']}, provided={user_id}")
-                    raise HTTPException(status_code=401, detail="User ID mismatch")
-        
-        logger.info(f"Cognito token validated successfully for user: {user_info['user_id']}")
-        return user_info
-        
-    except HTTPException:
-        raise
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected error during token validation: {e}")
+        logger.error(f"Error validating token: {str(e)}")
         raise HTTPException(status_code=500, detail="Authentication service error")
 
+def get_aws_credentials_for_user(token):
+    """
+    Get AWS credentials for the authenticated user.
+    
+    Args:
+        token: JWT token from Cognito
+        
+    Returns:
+        dict: AWS credentials
+    """
+    try:
+        # Get Cognito configuration from environment variables
+        identity_pool_id = os.environ.get("COGNITO_IDENTITY_POOL_ID")
+        aws_region = os.environ.get("AWS_REGION", "us-east-1")
+        
+        if not identity_pool_id:
+            logger.warning("Missing Cognito Identity Pool ID, cannot get AWS credentials")
+            return None
+        
+        # Create a Cognito Identity client
+        client = boto3.client("cognito-identity", region_name=aws_region)
+        
+        # Get an identity ID for the user
+        response = client.get_id(
+            IdentityPoolId=identity_pool_id,
+            Logins={
+                f"cognito-idp.{aws_region}.amazonaws.com/{os.environ.get('COGNITO_USER_POOL_ID')}": token
+            }
+        )
+        identity_id = response["IdentityId"]
+        
+        # Get credentials for the identity
+        response = client.get_credentials_for_identity(
+            IdentityId=identity_id,
+            Logins={
+                f"cognito-idp.{aws_region}.amazonaws.com/{os.environ.get('COGNITO_USER_POOL_ID')}": token
+            }
+        )
+        
+        # Return the credentials
+        return {
+            "access_key": response["Credentials"]["AccessKeyId"],
+            "secret_key": response["Credentials"]["SecretKey"],
+            "session_token": response["Credentials"]["SessionToken"]
+        }
+        
+    except ClientError as e:
+        logger.error(f"Error getting AWS credentials: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error getting AWS credentials: {str(e)}")
+        return None

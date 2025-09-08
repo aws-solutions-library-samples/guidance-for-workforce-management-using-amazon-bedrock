@@ -5,22 +5,18 @@ Features:
 - WebSocket endpoint with AWS Cognito JWT token authentication
 - REST API endpoints for chat and image upload
 - AWS Bedrock integration for AI responses
-- Automatic AWS credentials refresh
 - Tool configuration and S2S session management
 
 Authentication:
 - WebSocket connections require valid AWS Cognito JWT tokens passed as query parameters
 - Token validation includes signature verification using Cognito's JWKS public keys
-- Supports both ID tokens and access tokens from Cognito
+- Supports ID tokens from Cognito (not access tokens)
 - Validates issuer, audience, expiration, and user identity
 
 Environment Variables:
-- DEBUG: Enable debug mode for detailed logging (default: false)
 - PORT: Server port (default: 8000)
 - HOST: Server host (default: 0.0.0.0)
 - AWS_REGION: AWS region for Bedrock
-- AWS_REFRESH_INTERVAL: AWS credentials refresh interval in seconds
-- COGNITO_REGION: AWS region for Cognito (defaults to AWS_REGION)
 - COGNITO_USER_POOL_ID: AWS Cognito User Pool ID (required for authentication)
 - COGNITO_APP_CLIENT_ID: AWS Cognito App Client ID (required for authentication)
 """
@@ -30,7 +26,7 @@ import os
 import logging
 import threading
 import time
-import aws_credentials
+import socket
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -47,158 +43,39 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from s2s_events import S2sEvent
 from restapi import ToolsList
 from s2s_session_manager import S2sSessionManager
+
 from auth import validate_token
 from websockets.exceptions import ConnectionClosed
 # Load environment variables from .env file
 from dotenv import load_dotenv
-load_dotenv()
+import os
+# Load .env file from the same directory as this script
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+
+
+print("Custom OpenTelemetry configuration loaded successfully")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 STACK_NAME = os.getenv("STACK_NAME", "backend")
-name = f"{STACK_NAME}-server"
+name = f"run_servers"
 logger = logging.getLogger(name)
+logger.setLevel(logging.INFO)  # Explicitly set level
 
-# Debug: Log environment variables on startup
-logger.info("="*60)
-logger.info("ENVIRONMENT VARIABLES DEBUG")
+
+# Log environment variables on startup
 logger.info("="*60)
 logger.info(f"COGNITO_USER_POOL_ID: {os.getenv('COGNITO_USER_POOL_ID')}")
+logger.info(f"COGNITO_IDENTITY_POOL_ID: {os.getenv('COGNITO_IDENTITY_POOL_ID')}")
 logger.info(f"COGNITO_APP_CLIENT_ID: {os.getenv('COGNITO_APP_CLIENT_ID')}")
-logger.info(f"COGNITO_REGION: {os.getenv('COGNITO_REGION')}")
 logger.info(f"AWS_REGION: {os.getenv('AWS_REGION')}")
-logger.info(f"DISABLE_AUTH: {os.getenv('DISABLE_AUTH')}")
 logger.info("="*60)
-
-# Debug mode flag
-DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 # Default ports if not specified in environment variables
 DEFAULT_PORT = 8000
 DEFAULT_HOST = "0.0.0.0"
 
-# Default AWS credentials refresh interval in 30 minutes (1800 seconds) - more proactive
-DEFAULT_AWS_REFRESH_INTERVAL = 1800
-
-# Global variables
-restart_in_progress = False
-
-def no_op_callback():
-    """No-op callback for testing credential refresh without server restart"""
-    logger.info("🔄 AWS credentials refreshed successfully - callback executed")
-    logger.info("💡 Future enhancement: This is where active sessions would be notified to refresh their Bedrock clients")
-    
-    # Log current environment variables for verification
-    access_key = os.environ.get('AWS_ACCESS_KEY_ID', '')
-    session_token = os.environ.get('AWS_SESSION_TOKEN', '')
-    logger.info(f"✅ Environment verification - Access key: {access_key[:5]}..." if access_key else "❌ No access key found")
-    logger.info(f"✅ Session token: {'Present' if session_token else 'Missing'}")
-    
-    return True
-
-def run_aws_credentials_refresh():
-    """Set up AWS credentials refresh using asyncio scheduling"""
-    refresh_interval = int(os.getenv("AWS_REFRESH_INTERVAL", DEFAULT_AWS_REFRESH_INTERVAL))
-    logger.info(f"Setting up AWS credentials refresh with interval of {refresh_interval} seconds")
-    
-    # Ensure the refresh function has the callback attribute
-    if not hasattr(aws_credentials.refresh_aws_credentials, 'on_credentials_refreshed'):
-        aws_credentials.refresh_aws_credentials.on_credentials_refreshed = None
-    
-    # Initial refresh - but don't call callback yet since servers haven't started
-    logger.info("Performing initial AWS credentials refresh (without callback)")
-    initial_success = aws_credentials.refresh_aws_credentials()
-    logger.info(f"Initial AWS credentials refresh {'succeeded' if initial_success else 'failed'}")
-    
-    # NOW register the callback for future refreshes
-    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
-    logger.info("Registered no-op credentials refresh callback for future refreshes")
-    
-    # State for tracking refresh attempts
-    refresh_state = {
-        'count': 0,
-        'consecutive_failures': 0,
-        'max_consecutive_failures': 3,
-        'current_interval': refresh_interval
-    }
-    
-    async def schedule_refresh():
-        """Schedule the next credential refresh"""
-        def refresh_and_reschedule():
-            """Perform refresh and schedule next one"""
-            try:
-                refresh_state['count'] += 1
-                logger.info(f"Refreshing AWS credentials (attempt #{refresh_state['count']})")
-                
-                # Ensure callback is still set
-                if not hasattr(aws_credentials.refresh_aws_credentials, 'on_credentials_refreshed') or aws_credentials.refresh_aws_credentials.on_credentials_refreshed is None:
-                    logger.warning("Credentials refresh callback is not set, setting it now")
-                    aws_credentials.refresh_aws_credentials.on_credentials_refreshed = no_op_callback
-                
-                success = aws_credentials.refresh_aws_credentials()
-                
-                if success:
-                    refresh_state['consecutive_failures'] = 0
-                    logger.info(f"AWS credentials refresh #{refresh_state['count']} succeeded")
-                    
-                    # Periodic credential validation (every 5th refresh)
-                    if refresh_state['count'] > 1 and refresh_state['count'] % 5 == 0:
-                        try:
-                            sts = boto3.client('sts')
-                            identity = sts.get_caller_identity()
-                            logger.info(f"AWS credentials check: Valid (Identity: {identity.get('Arn', 'Unknown')})")
-                            
-                            # Gradually increase interval for stable refreshes
-                            if refresh_state['consecutive_failures'] == 0 and refresh_state['count'] > 10:
-                                new_interval = min(refresh_state['current_interval'] * 1.1, 7200)  # Cap at 2 hours instead of 1 hour
-                                if new_interval > refresh_state['current_interval']:
-                                    refresh_state['current_interval'] = int(new_interval)
-                                    logger.info(f"Increasing refresh interval to {refresh_state['current_interval']} seconds")
-                        except Exception as e:
-                            logger.error(f"AWS credentials check failed: {e}")
-                else:
-                    refresh_state['consecutive_failures'] += 1
-                    logger.error(f"AWS credentials refresh #{refresh_state['count']} failed ({refresh_state['consecutive_failures']} consecutive failures)")
-                    
-                    # Reset interval on failures to try more frequently
-                    if refresh_state['consecutive_failures'] >= refresh_state['max_consecutive_failures']:
-                        logger.error(f"Too many consecutive failures ({refresh_state['consecutive_failures']}), resetting refresh interval")
-                        refresh_state['current_interval'] = refresh_interval  # Reset to original interval
-                
-            except Exception as e:
-                logger.error(f"Exception in AWS credentials refresh: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                refresh_state['consecutive_failures'] += 1
-            
-            # Schedule next refresh
-            try:
-                loop = asyncio.get_event_loop()
-                loop.call_later(refresh_state['current_interval'], refresh_and_reschedule)
-                logger.debug(f"Next refresh scheduled in {refresh_state['current_interval']} seconds")
-            except Exception as e:
-                logger.error(f"Failed to schedule next refresh: {e}")
-        
-        # Schedule the first refresh
-        loop = asyncio.get_event_loop()
-        loop.call_later(refresh_interval, refresh_and_reschedule)
-        logger.info(f"AWS credentials refresh scheduled to start in {refresh_interval} seconds")
-    
-    return schedule_refresh
-
-# def restart_servers():
-#     """Restart the unified server - DISABLED FOR TESTING"""
-#     global restart_in_progress
-    
-#     logger.info("Server restart called but DISABLED for testing credential refresh without restart")
-#     restart_in_progress = True
-    
-#     # Add a small delay to ensure everything is ready
-#     time.sleep(2)
-    
-#     restart_in_progress = False
-#     return True
 
 def extract_websocket_params(websocket: WebSocket) -> dict:
     """
@@ -236,8 +113,8 @@ app.add_middleware(
 app.include_router(restapi_app.router)
 
 # Add WebSocket endpoint with session ID
-@app.websocket("/ws/{client_id}")
-async def websocket_endpoint(websocket: WebSocket, client_id: str):
+@app.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
     user_info = None
     connection_accepted = False
     
@@ -247,12 +124,16 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         token = auth_params["token"]
         user_id = auth_params["user_id"]
         
-        logger.info(f"WebSocket connection attempt from user: {user_id}, session: {client_id}")
+        logger.info(f"WebSocket connection attempt from user: {user_id}, session: {session_id}")
         
         # Validate authentication before accepting connection
         try:
             user_info = validate_token(token, user_id)
-            logger.info(f"Authentication successful for user: {user_info['user_id']}")
+            logger.info(f"Authentication successful for user: {user_info}")
+        except Exception as auth_error:
+            logger.info(f"User info details: {json.dumps({k: v for k, v in user_info.items() if k != 'aws_credentials'})}")
+            raise auth_error
+        
         except HTTPException as e:
             logger.warning(f"Authentication failed for WebSocket connection: {e.detail}")
             try:
@@ -272,7 +153,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         await websocket.accept()
         connection_accepted = True
         
-        logger.info(f"WebSocket connection accepted for user: {user_info['user_id']}, session: {client_id}")
+        logger.info(f"WebSocket connection accepted for user: {user_info['user_id']}, session: {session_id}")
         
     except Exception as e:
         logger.error(f"Error extracting WebSocket parameters or accepting connection: {e}")
@@ -288,18 +169,21 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     cleanup_initiated = False
     
     try:
-        # Create a stream manager for this connection
-        stream_manager = S2sSessionManager(model_id='amazon.nova-sonic-v1:0', 
-                                          region=os.environ["AWS_REGION"])
         
-        # Store user context and session info in stream manager
-        stream_manager.user_info = user_info
-        stream_manager.client_id = client_id
+
+        logger.info(f"Set user_info on stream_manager for user: {user_info['user_id']}, session: {session_id}")
+        stream_manager = S2sSessionManager(model_id='amazon.nova-sonic-v1:0', 
+                                            region=os.environ["AWS_REGION"],
+                                            session_id=session_id,
+                                            user_info=user_info)
+        
+        logger.info(f"Stream manager user_info contains keys: {list(stream_manager.user_info.keys())}")
         
         await stream_manager.initialize_stream()
         
         # Start a task to forward responses from Bedrock to the WebSocket
-        forward_task = asyncio.create_task(forward_responses(websocket, stream_manager, client_id))
+        logger.info(f"Starting forward_responses task for session: {session_id}")
+        forward_task = asyncio.create_task(forward_responses(websocket, stream_manager, session_id))
         
         while connection_accepted:
             try:
@@ -312,67 +196,32 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     if 'body' in data:
                         data = json.loads(data["body"])
                 except json.JSONDecodeError as e:
-                    logger.error(f"Invalid JSON received from WebSocket (user: {user_info['user_id']}, session: {client_id}): {e}")
+                    logger.error(f"Invalid JSON received from WebSocket (user: {user_info['user_id']}, session: {session_id}): {e}")
                     continue
                 
                 # Handle S2S protocol messages
                 if 'event' in data:
                     event_type = list(data['event'].keys())[0]
+
+                    if event_type == 'sessionStart':
+                        # Extract the prompt name from the event
+                        prompt_name = data['event']['sessionStart'].get('promptName')
+                        logger.info(f"Received sessionStart event with promptName: {prompt_name} for session: {session_id}")
+        
+                        # Initialize the session
+                        logger.info(f"Initializing session with prompt: {prompt_name} for session: {session_id}")
+                        await stream_manager.initialize_session_with_prompt(prompt_name)
+                        logger.info(f"Session initialized successfully for session: {session_id}")
+                        
+                        
                     
                     # Log event type (except for audio which would be too verbose)
                     if event_type != "audioInput":
-                        logger.info(f"Received event type: {event_type} from user: {user_info['user_id']}, session: {client_id}")
+                        logger.info(f"Received event type: {event_type} from user: {user_info['user_id']}, session: {session_id}")
                     
 
                     if event_type == 'contentStart' and data['event']['contentStart'].get('type') == 'AUDIO':
-                        stream_manager.audio_content_name = data['event']['contentStart']['contentName']
-
-                    elif event_type == 'promptStart':
-                        stream_manager.prompt_name = data['event']['promptStart']['promptName']
-                        
-                        # Define default tool configuration
-                        DEFAULT_TOOL_CONFIG = S2sEvent.DEFAULT_TOOL_CONFIG
-                        
-                        # Create an instance of the ToolsList class
-                        tools_instance = ToolsList()
-                        
-                        # Initialize the tools configuration
-                        tools_config = {
-                            "tools": [],
-                            "toolChoice": { "any": {} }
-                        }
-                        
-                        # Get all methods that have been decorated with bedrock_tool
-                        for method_name in dir(tools_instance):
-                            if method_name.startswith('_'):
-                                continue
-                            
-                            method = getattr(tools_instance, method_name)
-                            if hasattr(method, 'bedrock_schema'):
-                                tool_schema = dict(method.bedrock_schema)
-                                
-                                # Ensure inputSchema.json is serialized as a JSON string
-                                if isinstance(tool_schema.get('toolSpec', {}).get('inputSchema', {}).get('json'), (dict, list)):
-                                    tool_schema['toolSpec']['inputSchema']['json'] = json.dumps(
-                                        tool_schema['toolSpec']['inputSchema']['json']
-                                    )
-                                
-                                tools_config["tools"].append(tool_schema)
-                        
-                        # If no tools were found, fall back to default
-                        if len(tools_config["tools"]) == 0:
-                            logger.info("No tools found in ToolsList, using default config")
-                            tools_config = DEFAULT_TOOL_CONFIG
-                        
-                        
-                        # Inject our configurations into the original event
-                        if 'toolConfiguration' not in data['event']['promptStart']:
-                            data['event']['promptStart']['toolConfiguration'] = tools_config
-
-                            logger.info(f"Using tools for user {user_info['user_id']}, session {client_id}: " + str(data['event']['promptStart']['toolConfiguration']))
-                        
-                        # Set the tool configuration on the stream manager
-                        stream_manager.toolConfiguration = tools_config
+                        stream_manager.audio_content_name = data['event']['contentStart']['contentName']          
                         
                     # Handle audio input
                     if event_type == 'audioInput':
@@ -380,42 +229,37 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                         content_name = data['event']['audioInput']['contentName']
                         audio_base64 = data['event']['audioInput']['content']
                         stream_manager.add_audio_chunk(prompt_name, content_name, audio_base64)
-                    # Handle other events
-                    else:
+                    # Handle other events (except sessionStart which is already handled in initialize_session_with_prompt)
+                    elif event_type != 'sessionStart':
                         await stream_manager.send_raw_event(data)
                 
             except WebSocketDisconnect:
-                logger.info(f"WebSocket disconnected for user: {user_info['user_id']}, session: {client_id}")
+                logger.info(f"WebSocket disconnected for user: {user_info['user_id']}, session: {session_id}")
                 break
             except ConnectionClosed:
-                logger.info(f"WebSocket connection closed for user: {user_info['user_id']}, session: {client_id}")
+                logger.info(f"WebSocket connection closed for user: {user_info['user_id']}, session: {session_id}")
                 break
             except Exception as e:
                 error_msg = str(e)
                 # Handle specific WebSocket state errors more gracefully
                 if "WebSocket is not connected" in error_msg or "Need to call \"accept\" first" in error_msg:
-                    logger.warning(f"WebSocket connection {client_id} is in invalid state, stopping message processing: {error_msg}")
+                    logger.warning(f"WebSocket connection {session_id} is in invalid state, stopping message processing: {error_msg}")
                     break
                 else:
-                    logger.error(f"Error processing WebSocket message for user {user_info['user_id']}, session {client_id}: {e}")
-                    if DEBUG:
-                        import traceback
-                        traceback.print_exc()
+                    logger.error(f"Error processing WebSocket message for user {user_info['user_id']}, session {session_id}: {e}")
                     # For other errors, don't break the loop immediately but add a small delay
                     await asyncio.sleep(0.1)
     
     except Exception as e:
-        logger.error(f"Unexpected error in websocket handler for user {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session {client_id}: {e}")
-        if DEBUG:
-            import traceback
-            traceback.print_exc()
+        logger.error(f"Unexpected error in websocket handler for user {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session {session_id}: {e}")
+
     finally:
         # Clean up resources
         if not cleanup_initiated:
             cleanup_initiated = True
             
             if forward_task and not forward_task.done():
-                logger.info(f"Cancelling forward_task for user: {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session: {client_id}")
+                logger.info(f"Cancelling forward_task for user: {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session: {session_id}")
                 forward_task.cancel()
                 try:
                     await forward_task # Directly await the task after cancellation
@@ -428,11 +272,11 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             if stream_manager:
                 try:
                     await stream_manager.close()
-                    logger.info(f"Stream manager closed for user: {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session: {client_id}")
+                    logger.info(f"Stream manager closed for user: {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session: {session_id}")
                 except Exception as e:
                     logger.error(f"Error closing stream manager: {e}")
             
-        logger.info(f"WebSocket handler completed for user: {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session: {client_id}")
+        logger.info(f"WebSocket handler completed for user: {user_info.get('user_id', 'unknown') if user_info else 'unknown'}, session: {session_id}")
 
 
 # Add health check endpoint
@@ -464,58 +308,78 @@ async def health_check():
         logger.error(f"Health check error: {e}")
         return {"status": "degraded", "error": str(e), "timestamp": time.time()}
 
-async def forward_responses(websocket: WebSocket, stream_manager: S2sSessionManager, client_id: str):
+async def forward_responses(websocket: WebSocket, stream_manager, session_id: str):
     """Forward responses from Bedrock to the WebSocket."""
     try:
-        logger.info(f"Starting forward_responses for session: {client_id}")
+        logger.info(f"Starting forward_responses for session: {session_id}")
         while True:
             try:
                 # Get next response from the output queue with a timeout
                 try:
                     response = await asyncio.wait_for(stream_manager.output_queue.get(), timeout=0.5)
-                    logger.info(f"Got response from output queue for session {client_id}: {response.get('event', {}).keys()}")
+                    
+                    # Log event type for debugging (except audio events which would be too verbose)
+                    if "event" in response:
+                        event_type = list(response["event"].keys())[0] if "event" in response else "unknown"
+                        if event_type not in ["audioOutput", "audioInput"]:
+                            logger.debug(f"[Session {session_id}] Got {event_type} event from output queue")
+                            
+                            # Log tool use events in more detail
+                            if event_type == "toolUse":
+                                tool_name = response["event"]["toolUse"].get("toolName", "unknown")
+                                tool_use_id = response["event"]["toolUse"].get("toolUseId", "unknown")
+                                logger.info(f"[Session {session_id}] Tool use detected: {tool_name}, ID: {tool_use_id}")
+                            
+                            # Log tool result events in more detail
+                            elif event_type == "toolResult":
+                                tool_use_id = response["event"]["toolResult"].get("toolUseId", "unknown")
+                                logger.info(f"[Session {session_id}] Tool result received for ID: {tool_use_id}")
+                                
                 except asyncio.TimeoutError:
                     if not stream_manager.is_active:
-                        logger.info(f"Stream no longer active for session {client_id}, stopping forward_responses")
+                        logger.info(f"Stream no longer active for session {session_id}, stopping forward_responses")
                         break
                     continue
                 
                 # Send to WebSocket
                 try:
                     event = json.dumps(response)
-                    logger.info(f"Sending response to WebSocket session {client_id}: {response.get('event', {}).keys()}")
                     await websocket.send_text(event)
-                    logger.info(f"Response sent to WebSocket session {client_id} successfully")
+                    
+                    # Log important events (not audio)
+                    if "event" in response:
+                        event_type = list(response["event"].keys())[0] if "event" in response else "unknown"
+                        if event_type not in ["audioOutput", "audioInput"]:
+                            logger.debug(f"[Session {session_id}] Sent {event_type} event to WebSocket")
+                            
                 except WebSocketDisconnect:
-                    logger.info(f"WebSocket connection {client_id} closed during forward_responses")
+                    logger.info(f"WebSocket connection {session_id} closed during forward_responses")
                     break
                 except Exception as e:
-                    logger.error(f"Error sending response to WebSocket session {client_id}: {e}")
+                    logger.error(f"Error sending response to WebSocket session {session_id}: {e}")
                     continue
                     
             except asyncio.CancelledError:
-                logger.info(f"Forward responses task cancelled for session {client_id}")
+                logger.info(f"Forward responses task cancelled for session {session_id}")
                 raise
             except Exception as e:
-                logger.error(f"Error in forward_responses loop for session {client_id}: {e}")
+                logger.error(f"Error in forward_responses loop for session {session_id}: {e}")
                 if "retry-after" in str(e).lower():
-                    logger.warning(f"Rate limited by Bedrock API in forward_responses for session {client_id}")
+                    logger.warning(f"Rate limited by Bedrock API in forward_responses for session {session_id}")
                     await asyncio.sleep(1.0)
                     continue
                 
                 if not stream_manager.is_active:
-                    logger.info(f"Stream manager inactive for session {client_id}, stopping forward_responses")
+                    logger.info(f"Stream manager inactive for session {session_id}, stopping forward_responses")
                     break
     except asyncio.CancelledError:
         # Task was cancelled (normal behavior during cleanup)
-        logger.info(f"Forward responses task cancelled for session {client_id} - allowing main handler to clean up")
+        logger.info(f"Forward responses task cancelled for session {session_id} - allowing main handler to clean up")
     except Exception as e:
-        logger.error(f"Error forwarding responses for session {client_id}: {e}")
-        if DEBUG:
-            import traceback
-            traceback.print_exc()
+        logger.error(f"Error forwarding responses for session {session_id}: {e}")
+
     finally:
-        logger.info(f"Forward response task completed for session {client_id}")
+        logger.info(f"Forward response task completed for session {session_id}")
 
 async def cleanup_session_managers():
     """Clean up inactive session managers - simplified version since each connection manages its own"""
@@ -525,9 +389,7 @@ async def cleanup_session_managers():
 
 def main():
     """Main function to start the unified server"""
-    # Get the credentials refresh scheduler function
-    aws_refresh_scheduler = run_aws_credentials_refresh()
-    
+
     # Get port and host from environment variables
     port = int(os.getenv("PORT", DEFAULT_PORT))
     host = os.getenv("HOST", DEFAULT_HOST)
@@ -562,12 +424,9 @@ def main():
         asyncio.create_task(periodic_cleanup())
         logger.info("Started periodic session cleanup task")
         
-        # Start AWS credentials refresh scheduler
-        await aws_refresh_scheduler()
-        logger.info("AWS credentials refresh scheduler started")
     
     # Start the server
     uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":
-    main() 
+    main()

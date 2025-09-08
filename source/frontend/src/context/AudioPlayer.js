@@ -25,7 +25,7 @@ export default class AudioPlayer {
   constructor() {
     this.onAudioPlayedListeners = [];
     this.initialized = false;
-    console.log('[AudioPlayer] Constructor called');
+    // console.log('[AudioPlayer] Constructor called');
   }
 
   addEventListener(event, callback) {
@@ -44,7 +44,7 @@ export default class AudioPlayer {
 
   async start() {
     try {
-      console.log('[AudioPlayer] Starting initialization');
+      // console.log('[AudioPlayer] Starting initialization');
       
       // Create audio context with correct sample rate
       this.audioContext = new AudioContext({ 
@@ -54,7 +54,7 @@ export default class AudioPlayer {
       
       // Resume the audio context if it's suspended
       if (this.audioContext.state === 'suspended') {
-        console.log('[AudioPlayer] Resuming suspended audio context');
+        // console.log('[AudioPlayer] Resuming suspended audio context');
         await this.audioContext.resume();
       }
       
@@ -66,7 +66,7 @@ export default class AudioPlayer {
       // Load the audio worklet
       try {
         await this.audioContext.audioWorklet.addModule(AudioPlayerWorkletUrl);
-        console.log('[AudioPlayer] AudioWorklet module loaded successfully');
+        // console.log('[AudioPlayer] AudioWorklet module loaded successfully');
       } catch (error) {
         console.error('[AudioPlayer] Failed to load AudioWorklet:', error);
         throw error;
@@ -80,7 +80,7 @@ export default class AudioPlayer {
       
       // Set up message handling from the worklet
       this.workletNode.port.onmessage = (event) => {
-        console.log('[AudioPlayer] Received message from worklet:', event.data);
+        // console.log('[AudioPlayer] Received message from worklet:', event.data);
       };
       
       // Handle worklet errors
@@ -88,7 +88,7 @@ export default class AudioPlayer {
         console.error('[AudioPlayer] Worklet processor error:', error);
       };
       
-      console.log('[AudioPlayer] AudioWorkletNode created');
+      // console.log('[AudioPlayer] AudioWorkletNode created');
       
       // Connect the audio nodes
       this.workletNode.connect(this.analyser);
@@ -98,7 +98,7 @@ export default class AudioPlayer {
       this.#maybeOverrideInitialBufferLength();
       
       this.initialized = true;
-      console.log('[AudioPlayer] Initialization complete');
+      // console.log('[AudioPlayer] Initialization complete');
     } catch (error) {
       console.error('[AudioPlayer] Initialization failed:', error);
       this.stop();
@@ -111,14 +111,14 @@ export default class AudioPlayer {
       console.warn('[AudioPlayer] Cannot barge in - not initialized');
       return;
     }
-    console.log('[AudioPlayer] Sending barge-in request');
+    // console.log('[AudioPlayer] Sending barge-in request');
     this.workletNode.port.postMessage({
       type: "barge-in",
     });
   }
 
   stop() {
-    console.log('[AudioPlayer] Stopping audio player');
+    // console.log('[AudioPlayer] Stopping audio player');
     if (ObjectExt.exists(this.audioContext)) {
       this.audioContext.close().catch(error => {
         console.error('[AudioPlayer] Error closing audio context:', error);
@@ -150,7 +150,7 @@ export default class AudioPlayer {
       console.error("Invalid audioPlayerInitialBufferLength value:", value);
       return;
     }
-    console.log('[AudioPlayer] Setting initial buffer length:', bufferLength);
+    // console.log('[AudioPlayer] Setting initial buffer length:', bufferLength);
     this.workletNode.port.postMessage({
       type: "initial-buffer-length",
       bufferLength: bufferLength,
@@ -170,11 +170,11 @@ export default class AudioPlayer {
       return;
     }
     
-    console.log('[AudioPlayer] Playing audio samples, length:', samples.length);
+    // console.log('[AudioPlayer] Playing audio samples, length:', samples.length);
     
     // Ensure audio context is running
     if (this.audioContext.state === 'suspended') {
-      console.log('[AudioPlayer] Resuming suspended audio context');
+      // console.log('[AudioPlayer] Resuming suspended audio context');
       this.audioContext.resume().catch(error => {
         console.error('[AudioPlayer] Failed to resume audio context:', error);
       });

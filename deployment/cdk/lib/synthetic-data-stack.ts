@@ -979,7 +979,7 @@ def handler(event, context):
         EMAIL: props.emailAddress
       },
       layers: [
-        lambda.LayerVersion.fromLayerVersionArn(this, `${resourcePrefix}-Boto3Layer`, `arn:aws:lambda:${cdk.Stack.of(this).region}:770693421928:layer:Klayers-p312-boto3:8`),
+        lambda.LayerVersion.fromLayerVersionArn(this, `${resourcePrefix}-Boto3Layer`, `arn:aws:lambda:${cdk.Stack.of(this).region}:770693421928:layer:Klayers-p312-boto3:22`),
         lambda.LayerVersion.fromLayerVersionArn(this, `${resourcePrefix}-PydanticLayer`, `arn:aws:lambda:${cdk.Stack.of(this).region}:558258168256:layer:pydantic:1`),
         lambda.LayerVersion.fromLayerVersionArn(this, `${resourcePrefix}-PowertoolsLayer`, `arn:aws:lambda:${cdk.Stack.of(this).region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:4`)
       ],

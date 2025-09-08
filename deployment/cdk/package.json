@@ -8,13 +8,13 @@
     "build": "./node_modules/typescript/bin/tsc",
     "watch": "./node_modules/typescript/bin/tsc -w",
     "cdk": "cdk",
-    "deploy": "cdk deploy --outputs-file ../retail-frontend/src/cdk-outputs.json"
+    "deploy": "cdk deploy --outputs-file ../../source/frontend/src/cdk-outputs.json"
   },
   "dependencies": {
-    "@aws-cdk/lambda-layer-kubectl-v30": "^2.0.4",
+    "@aws-cdk/lambda-layer-kubectl-v33": "2.0.0",
     "@types/aws-lambda": "^8.10.137",
     "@types/node": "^20.12.7",
-    "aws-cdk-lib": "2.198.0",
+    "aws-cdk-lib": "2.206.0",
     "constructs": "^10.3.0",
     "dotenv": "^16.4.5",
     "esbuild": "^0.20.2",
@@ -23,7 +23,7 @@
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^7.1.1",
     "@typescript-eslint/parser": "^7.7.0",
-    "aws-cdk": "2.1016.1",
+    "aws-cdk": "^2.1025.0",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.1.3",

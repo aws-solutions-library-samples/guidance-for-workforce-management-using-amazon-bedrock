@@ -25,29 +25,9 @@ logging.basicConfig(level=logging.INFO,
                     datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = "Today is {date}. You are a retail store assistant for the user with the email address / userId {userId} . You answer questions about inventory, customer service, and store operations. Keep your responses helpful, accurate and concise. Don't spell numbers out, use numbers instead. NEVER ask for the userId or email address of the user."
+# System prompt is now handled by the backend, not passed from client
 
-# Default configurations matching frontend
-DEFAULT_TEXT_CONFIGURATION = {
-    "mediaType": "text/plain"
-}
-
-DEFAULT_INFERENCE_CONFIGURATION = {
-    "temperature": 0.7,
-    "topP": 0.9,
-    "maxTokens": 1024
-}
-
-DEFAULT_AUDIO_OUTPUT_CONFIGURATION = {
-    "mediaType": "audio/lpcm",
-    "sampleRateHertz": 24000,
-    "sampleSizeBits": 16,
-    "channelCount": 1,
-    "voiceId": "tiffany",
-    "encoding": "base64",
-    "audioType": "SPEECH"
-}
-
+# Audio input configuration - only configuration still sent from client
 DEFAULT_AUDIO_INPUT_CONFIGURATION = {
     "mediaType": "audio/lpcm",
     "sampleRateHertz": 16000,
@@ -166,10 +146,10 @@ class CognitoAuthenticator:
             dict: Authentication result with tokens
         """
         try:
-            response = self.cognito_client.admin_initiate_auth(
-                UserPoolId=self.user_pool_id,
+            # Use USER_PASSWORD_AUTH like the frontend
+            response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
-                AuthFlow='ADMIN_NO_SRP_AUTH',
+                AuthFlow='USER_PASSWORD_AUTH',
                 AuthParameters={
                     'USERNAME': username,
                     'PASSWORD': password
@@ -188,6 +168,7 @@ class CognitoAuthenticator:
             
             logger.info(f"Successfully authenticated user: {username}")
             logger.info(f"Tokens will expire in {expires_in} seconds")
+            logger.info(f"Token expiry time: {datetime.fromtimestamp(self.token_expiry)}")
             
             return {
                 'access_token': self.access_token,
@@ -206,6 +187,8 @@ class CognitoAuthenticator:
                 raise ValueError(f"User not found: {error_message}")
             elif error_code == 'UserNotConfirmedException':
                 raise ValueError(f"User not confirmed: {error_message}")
+            elif error_code == 'InvalidParameterException' and 'Auth flow not enabled' in error_message:
+                raise ValueError(f"Auth flow not enabled: {error_message}. Please ensure ALLOW_USER_PASSWORD_AUTH is enabled for your Cognito App Client.")
             else:
                 raise ValueError(f"Authentication error ({error_code}): {error_message}")
     
@@ -220,8 +203,7 @@ class CognitoAuthenticator:
             raise ValueError("No refresh token available. Please authenticate again.")
         
         try:
-            response = self.cognito_client.admin_initiate_auth(
-                UserPoolId=self.user_pool_id,
+            response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
                 AuthFlow='REFRESH_TOKEN_AUTH',
                 AuthParameters={
@@ -240,6 +222,7 @@ class CognitoAuthenticator:
             self.token_expiry = time.time() + expires_in
             
             logger.info("Successfully refreshed tokens")
+            logger.info(f"New token expiry time: {datetime.fromtimestamp(self.token_expiry)}")
             
             return {
                 'access_token': self.access_token,
@@ -252,6 +235,19 @@ class CognitoAuthenticator:
             error_message = e.response['Error']['Message']
             raise ValueError(f"Token refresh failed ({error_code}): {error_message}")
     
+    def is_token_expired(self):
+        """
+        Check if the current token is expired or will expire soon.
+        
+        Returns:
+            bool: True if token is expired or will expire within 10 minutes
+        """
+        if not self.token_expiry:
+            return True
+        
+        # Consider token expired if it expires within 10 minutes
+        return time.time() > (self.token_expiry - 600)
+    
     def get_valid_token(self, token_type='id'):
         """
         Get a valid token, refreshing if necessary.
@@ -262,10 +258,14 @@ class CognitoAuthenticator:
         Returns:
             str: Valid JWT token
         """
-        # Check if tokens need to be refreshed (refresh 5 minutes before expiry)
-        if self.token_expiry and time.time() > (self.token_expiry - 300):
+        # Check if tokens need to be refreshed (refresh 10 minutes before expiry for safety)
+        if self.token_expiry and time.time() > (self.token_expiry - 600):
             logger.info("Tokens are expiring soon, refreshing...")
-            self.refresh_tokens()
+            try:
+                self.refresh_tokens()
+            except Exception as e:
+                logger.error(f"Token refresh failed: {e}")
+                raise ValueError(f"Token refresh failed: {e}")
         
         if token_type == 'id':
             if not self.id_token:
@@ -280,11 +280,14 @@ class CognitoAuthenticator:
 
 
 class NovaAsyncClient:
-    def __init__(self, user_id=None, password=None, server_url=None, debug=False, client_id=None, token=None):
+    def __init__(self, user_id=None, password=None, server_url=None, debug=False, session_id=None, token=None):
         self.user_id = user_id or f'user_{uuid.uuid4()}'
         self.server_url = server_url
-        self.client_id = client_id or f'client_{uuid.uuid4()}'
+        self.session_id = session_id or f'session_{uuid.uuid4()}'
         
+        # Store authentication details for token refresh
+        self.password = password
+        self.authenticator = None
         self.token = token
 
         if self.token is None:
@@ -292,19 +295,18 @@ class NovaAsyncClient:
                 cognito_user_pool_id = os.getenv('COGNITO_USER_POOL_ID')
                 cognito_client_id = os.getenv('COGNITO_APP_CLIENT_ID')
                 region = os.getenv('AWS_REGION', 'us-east-1')
-                authenticator = CognitoAuthenticator(
+                self.authenticator = CognitoAuthenticator(
                     user_pool_id=cognito_user_pool_id,
                     client_id=cognito_client_id,
                     region=region
                 )
-                result = authenticator.authenticate_with_password(user_id, password)
+                result = self.authenticator.authenticate_with_password(user_id, password)
                 logger.info("Successfully authenticated with Cognito")
-                self.token = authenticator.get_valid_token('id')
+                self.token = self.authenticator.get_valid_token('id')
             else:
                 raise ValueError("Password is required to authenticate with Cognito and retrieve a token.")
 
         self.websocket = None
-        self.session_id = None
         self.is_connected = False
         self.is_streaming = False
         self.responses = []
@@ -377,7 +379,7 @@ class NovaAsyncClient:
             url = url[:-3]
         
         # Add the client_id path parameter
-        url = f"{url}/ws/{self.client_id}"
+        url = f"{url}/ws/{self.session_id}"
         
         # Add authentication query parameters if available
         query_params = []
@@ -393,8 +395,20 @@ class NovaAsyncClient:
         return url
 
     async def connect(self):
-        """Establish WebSocket connection"""
+        """Establish WebSocket connection with fresh token"""
         try:
+            # Refresh token before connecting if we have an authenticator
+            if self.authenticator:
+                try:
+                    self.token = self.authenticator.get_valid_token('id')
+                    logger.debug("Refreshed token before connection")
+                except Exception as e:
+                    logger.warning(f"Token refresh failed, re-authenticating: {e}")
+                    # Re-authenticate if token refresh fails
+                    result = self.authenticator.authenticate_with_password(self.user_id, self.password)
+                    self.token = self.authenticator.get_valid_token('id')
+                    logger.info("Re-authenticated with fresh token")
+            
             logger.info(f"Connecting to WebSocket with userId: {self.user_id}")
             # Add connection timeout for better reliability in loops
             self.websocket = await asyncio.wait_for(
@@ -420,8 +434,8 @@ class NovaAsyncClient:
             logger.error(f"Connection error: {e}")
             return False
 
-    async def start_s2s_session(self, system_prompt=None):
-        """Start an S2S session with optional system prompt"""
+    async def start_s2s_session(self):
+        """Start an S2S session - updated to match backend protocol (system prompt handled by backend)"""
         if not self.is_connected:
             logger.error("Not connected to WebSocket")
             return False
@@ -431,11 +445,14 @@ class NovaAsyncClient:
             self.audio_responses = {}
             self.text_responses = {}
             
-            # Start session
+            # Generate prompt name first
+            self.prompt_name = f"prompt-{uuid.uuid4()}"
+            
+            # Send sessionStart event with promptName - matching backend expectations
             session_start_event = {
                 "event": {
                     "sessionStart": {
-                        "inferenceConfiguration": DEFAULT_INFERENCE_CONFIGURATION
+                        "promptName": self.prompt_name
                     }
                 }
             }
@@ -444,72 +461,7 @@ class NovaAsyncClient:
             self.session_started = True
 
             await asyncio.sleep(0.5)
-            
-            # Generate prompt name
-            self.prompt_name = f"prompt-{uuid.uuid4()}"
-            
-            # Start prompt
-            prompt_start_event = {
-                "event": {
-                    "promptStart": {
-                        "promptName": self.prompt_name,
-                        "textOutputConfiguration": DEFAULT_TEXT_CONFIGURATION,
-                        "audioOutputConfiguration": DEFAULT_AUDIO_OUTPUT_CONFIGURATION
-                    }
-                }
-            }
-            logger.info(f"Sending prompt start event: {prompt_start_event}")
-            await self.websocket.send(json.dumps(prompt_start_event))
-            
-            await asyncio.sleep(0.5)
 
-            # Send system prompt if provided
-            if system_prompt:
-                system_content_name = f"text-{uuid.uuid4()}"
-                
-                # Start system content
-                content_start_event = {
-                    "event": {
-                        "contentStart": {
-                            "promptName": self.prompt_name,
-                            "contentName": system_content_name,
-                            "type": "TEXT",
-                            "interactive": True,
-                            "role": "SYSTEM",
-                            "textInputConfiguration": DEFAULT_TEXT_CONFIGURATION
-                        }
-                    }
-                }
-                logger.info(f"Sending content start event for system prompt: {content_start_event}")
-                await self.websocket.send(json.dumps(content_start_event))
-                
-                await asyncio.sleep(0.5)
-                
-                # Send system prompt
-                text_input_event = {
-                    "event": {
-                        "textInput": {
-                            "promptName": self.prompt_name,
-                            "contentName": system_content_name,
-                            "content": system_prompt
-                        }
-                    }
-                }
-                logger.info(f"Sending text input event for system prompt: {text_input_event}")
-                await self.websocket.send(json.dumps(text_input_event))
-                
-                await asyncio.sleep(0.5)
-                # End system content
-                content_end_event = {
-                    "event": {
-                        "contentEnd": {
-                            "promptName": self.prompt_name,
-                            "contentName": system_content_name
-                        }
-                    }
-                }
-                logger.info(f"Sending content end event for system prompt: {content_end_event}")
-                await self.websocket.send(json.dumps(content_end_event))
             
             logger.info(f"S2S session started with promptName: {self.prompt_name}")
             return self.prompt_name
@@ -1099,6 +1051,44 @@ class NovaAsyncClient:
             logger.error(f"Error converting audio file: {e}")
             raise
 
+    def handle_token_expiration_error(self, error_message):
+        """
+        Handle token expiration errors by attempting to refresh or re-authenticate.
+        
+        Args:
+            error_message (str): The error message containing token expiration info
+            
+        Returns:
+            bool: True if token was successfully refreshed, False otherwise
+        """
+        if "ExpiredTokenException" in error_message or "expired" in error_message.lower():
+            logger.warning("Detected token expiration error, attempting to refresh token")
+            
+            if self.authenticator:
+                try:
+                    # Try to refresh the token
+                    self.authenticator.refresh_tokens()
+                    self.token = self.authenticator.get_valid_token('id')
+                    logger.info("Successfully refreshed expired token")
+                    return True
+                except Exception as refresh_error:
+                    logger.warning(f"Token refresh failed: {refresh_error}")
+                    
+                    # If refresh fails, try to re-authenticate
+                    try:
+                        result = self.authenticator.authenticate_with_password(self.user_id, self.password)
+                        self.token = self.authenticator.get_valid_token('id')
+                        logger.info("Successfully re-authenticated after token expiration")
+                        return True
+                    except Exception as auth_error:
+                        logger.error(f"Re-authentication failed: {auth_error}")
+                        return False
+            else:
+                logger.error("No authenticator available to refresh expired token")
+                return False
+        
+        return False
+
     async def handle_message(self, message):
         """Handle incoming WebSocket messages"""
         try:
@@ -1120,6 +1110,12 @@ class NovaAsyncClient:
             # Handle text messages
             if not message.startswith('{'):
                 logger.info(f"Received text message: {message}")
+                
+                # Check for token expiration errors
+                if "ExpiredTokenException" in message or "expired" in message.lower():
+                    if self.handle_token_expiration_error(message):
+                        logger.info("Token refreshed, but connection may need to be re-established")
+                
                 self.responses.append(("text", message))
                 return
             
@@ -1180,7 +1176,7 @@ class NovaAsyncClient:
                     # Store the usage event
                     self.usage_events.append(event_data)
                     
-                    # Update token usage aggregates
+                    # Update token usage aggregates - matching backend format
                     if 'totalInputTokens' in event_data:
                         self.token_usage['totalInputTokens'] = event_data.get('totalInputTokens', 0)
                     if 'totalOutputTokens' in event_data:
@@ -1188,7 +1184,7 @@ class NovaAsyncClient:
                     if 'totalTokens' in event_data:
                         self.token_usage['totalTokens'] = event_data.get('totalTokens', 0)
                     
-                    # Update detailed token usage if available
+                    # Update detailed token usage if available - enhanced to match backend processing
                     if 'details' in event_data:
                         details = event_data.get('details', {})
                         if 'delta' in details:
@@ -1219,6 +1215,15 @@ class NovaAsyncClient:
                                     self.token_usage['details']['output']['speechTokens'])
                                 self.token_usage['details']['output']['textTokens'] = output_total.get('textTokens', 
                                     self.token_usage['details']['output']['textTokens'])
+                    
+                    # Log token usage for debugging
+                    logger.debug(f"Updated token usage: {self.token_usage}")
+                
+                elif event_type == 'toolUse':
+                    logger.info(f"Tool use detected: {event_data.get('toolName', 'unknown')}")
+                
+                elif event_type == 'toolResult':
+                    logger.info(f"Tool result received for ID: {event_data.get('toolUseId', 'unknown')}")
             
             # Handle connection status
             elif data.get('type') == 'connection_status' and data.get('status') == 'ready':
@@ -1239,9 +1244,8 @@ class NovaAsyncClient:
             # 1. Start S2S session if not already started
             if not self.session_started:
                 logger.info("Starting new S2S session...")
-                system_prompt = DEFAULT_SYSTEM_PROMPT.replace("{date}", datetime.now().strftime("%Y-%m-%d")).replace("{userId}", user_id)
-                logger.info(f"System prompt: {system_prompt}")
-                await self.start_s2s_session(system_prompt=system_prompt)
+                # System prompt is now handled by the backend
+                await self.start_s2s_session()
                 await asyncio.sleep(0.5)  # Allow session to be fully established
             
             if not self.prompt_name:
@@ -1781,9 +1785,25 @@ class NovaAsyncClient:
         self.last_audio_sent_time = None
         self.first_audio_received_time = None
         self.time_to_first_audio = None
+        
+        # Refresh token for next test if we have an authenticator
+        if self.authenticator:
+            try:
+                self.token = self.authenticator.get_valid_token('id')
+                logger.debug("Token refreshed during state reset")
+            except Exception as e:
+                logger.warning(f"Token refresh failed during reset: {e}")
+                # Re-authenticate if needed
+                try:
+                    result = self.authenticator.authenticate_with_password(self.user_id, self.password)
+                    self.token = self.authenticator.get_valid_token('id')
+                    logger.info("Re-authenticated during state reset")
+                except Exception as auth_error:
+                    logger.error(f"Re-authentication failed during reset: {auth_error}")
+        
         logger.debug("Client state reset for loop reuse")
 
-async def run_test(audio_path, user_id=None, server_url=None, debug=False, client_id=None, password=None, output_dir="responses/model_sonic", retrieve_logs=True, log_group_name=None):
+async def run_test(audio_path, user_id=None, server_url=None, debug=False, session_id=None, password=None, output_dir="responses/model_sonic"):
     """Run a complete audio test with a single audio file
     
     Args:
@@ -1791,7 +1811,7 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
         user_id (str, optional): User ID for authentication
         server_url (str, optional): WebSocket server URL
         debug (bool): Enable debug logging
-        client_id (str, optional): Client ID for WebSocket connection
+        session_id (str, optional): Client ID for WebSocket connection
         password (str, optional): Password for Cognito authentication
         output_dir (str): Directory to save responses to (default: "responses/model_sonic")
         retrieve_logs (bool): Whether to retrieve CloudWatch logs for function calls (default: True)
@@ -1806,16 +1826,23 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
     logger.info(f"Using server URL: {server_url}")
     logger.info(f"Using user ID: {user_id}")
     
-    # Generate unique client_id if not provided to avoid conflicts in loops
-    if client_id is None:
-        client_id = f"client_{uuid.uuid4()}"
-    logger.info(f"Using client ID: {client_id}")
+    # Generate unique session_id if not provided to avoid conflicts in loops
+    if session_id is None:
+        session_id = f"session_{uuid.uuid4()}"
+    logger.info(f"Using session_id: {session_id}")
 
     client = None
     start_time = datetime.now()  # Record start time for CloudWatch logs
     
     try:
-        client = NovaAsyncClient(user_id=user_id, password=password, server_url=server_url, debug=debug, client_id=client_id)
+        # Create a fresh client instance for each test to avoid token reuse issues
+        client = NovaAsyncClient(user_id=user_id, password=password, server_url=server_url, debug=debug, session_id=session_id)
+        
+        # Log token expiry information for debugging
+        if client.authenticator and client.authenticator.token_expiry:
+            expiry_time = datetime.fromtimestamp(client.authenticator.token_expiry)
+            time_until_expiry = client.authenticator.token_expiry - time.time()
+            logger.info(f"Token expires at: {expiry_time} (in {time_until_expiry/60:.1f} minutes)")
         
         # Validate raw audio files before processing
         file_ext = os.path.splitext(audio_path)[1].lower()
@@ -1856,9 +1883,9 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
                 logger.error("Failed to stream audio")
                 return None
             
-            # Wait for initial responses - reduced from 30 seconds to 15
-            logger.info("Waiting for responses (15 seconds)...")
-            await asyncio.sleep(15)
+            # Wait for initial responses - increased to handle backend processing delays
+            logger.info("Waiting for responses (20 seconds)...")
+            await asyncio.sleep(20)
             
         finally:
             # Cancel receiver task gracefully
@@ -1896,44 +1923,6 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
                 text_responses = len([r for r, c in client.responses if r == "text"])
                 logger.info(f"Test completed with {audio_responses} audio responses and {text_responses} text responses")
                 
-                # Retrieve CloudWatch logs for function calls if requested
-                if retrieve_logs and client.session_id:
-                    end_time = datetime.now()
-                    try:
-                        logger.info("Retrieving CloudWatch logs for function calls...")
-                        logs_retriever = CloudWatchLogsRetriever(
-                            log_group_name=log_group_name
-                        )
-                        
-                        # Extract function calls from logs
-                        function_calls = logs_retriever.extract_function_calls(
-                            start_time=start_time,
-                            end_time=end_time,
-                            user_id=user_id,
-                            session_id=client.session_id
-                        )
-                        
-                        if function_calls:
-                            logger.info(f"Found {len(function_calls)} function calls in CloudWatch logs")
-                            
-                            # Save function calls to JSON file
-                            function_calls_file = os.path.join(
-                                output_dir, 
-                                f"{os.path.splitext(os.path.basename(audio_path))[0]}_function_calls.json"
-                            )
-                            
-                            with open(function_calls_file, 'w') as f:
-                                json.dump(function_calls, f, indent=2, default=str)
-                                
-                            logger.info(f"Saved function calls to {function_calls_file}")
-                        else:
-                            logger.warning("No function calls found in CloudWatch logs")
-                    except Exception as e:
-                        logger.error(f"Error retrieving CloudWatch logs: {e}")
-                
-                # Force garbage collection to help with memory management in loops
-                import gc
-                gc.collect()
                 
             except Exception as cleanup_error:
                 logger.error(f"Error during final cleanup: {cleanup_error}")
@@ -1944,6 +1933,7 @@ async def run_test(audio_path, user_id=None, server_url=None, debug=False, clien
 async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False, password=None, delay_between_tests=2.0, output_dir="./responses"):
     """
     Run tests in a loop with proper resource management and error handling.
+    Each test gets a fresh sessionId
     
     Args:
         audio_files (list): List of audio file paths to test
@@ -1969,15 +1959,15 @@ async def run_test_loop(audio_files, user_id=None, server_url=None, debug=False,
         
         try:
             # Generate unique client ID for each iteration
-            client_id = f"loop_test_{i}_{uuid.uuid4()}"
+            session_id = f"loop_test_{i}_{uuid.uuid4()}"
             
-            # Run the test
+            # Run the test with fresh client instance
             result = await run_test(
                 audio_path=audio_file,
                 user_id=user_id, 
                 server_url=server_url,
                 debug=debug,
-                client_id=client_id,
+                session_id=session_id,
                 password=password,
                 output_dir=output_dir
             )
@@ -2100,242 +2090,6 @@ async def run_multiple_test_loops(audio_files, num_runs=10, user_id=None, server
     
     return all_results
 
-class CloudWatchLogsRetriever:
-    """
-    Retrieves and parses CloudWatch logs to extract function calls and other relevant information.
-    """
-    
-    def __init__(self, region=None, log_group_name=None):
-        """
-        Initialize the CloudWatch logs retriever.
-        
-        Args:
-            region (str, optional): AWS region
-            log_group_name (str, optional): CloudWatch log group name
-        """
-        self.region = region or os.getenv('AWS_REGION', 'us-east-1')
-        self.log_group_name = log_group_name or os.getenv('CLOUDWATCH_LOG_GROUP', '/aws/lambda/retail-assistant-function')
-        
-        # Initialize CloudWatch logs client
-        self.logs_client = boto3.client('logs', region_name=self.region)
-        
-        logger.info(f"Initialized CloudWatch logs retriever for region: {self.region}")
-        logger.info(f"Log group name: {self.log_group_name}")
-    
-    def get_log_streams(self, prefix=None, limit=50):
-        """
-        Get log streams from the specified log group.
-        
-        Args:
-            prefix (str, optional): Filter log streams by prefix
-            limit (int): Maximum number of log streams to return
-            
-        Returns:
-            list: List of log stream names
-        """
-        try:
-            params = {
-                'logGroupName': self.log_group_name,
-                'descending': True,
-                'orderBy': 'LastEventTime',
-                'limit': limit
-            }
-            
-            if prefix:
-                params['logStreamNamePrefix'] = prefix
-                
-            response = self.logs_client.describe_log_streams(**params)
-            
-            log_streams = [stream['logStreamName'] for stream in response.get('logStreams', [])]
-            logger.info(f"Found {len(log_streams)} log streams")
-            
-            return log_streams
-            
-        except Exception as e:
-            logger.error(f"Error getting log streams: {e}")
-            return []
-    
-    def get_log_events(self, log_stream_name, start_time=None, end_time=None, limit=1000):
-        """
-        Get log events from a specific log stream.
-        
-        Args:
-            log_stream_name (str): Name of the log stream
-            start_time (int, optional): Start time in milliseconds since epoch
-            end_time (int, optional): End time in milliseconds since epoch
-            limit (int): Maximum number of log events to return
-            
-        Returns:
-            list: List of log events
-        """
-        try:
-            params = {
-                'logGroupName': self.log_group_name,
-                'logStreamName': log_stream_name,
-                'limit': limit
-            }
-            
-            if start_time:
-                params['startTime'] = start_time
-            if end_time:
-                params['endTime'] = end_time
-                
-            response = self.logs_client.get_log_events(**params)
-            
-            events = response.get('events', [])
-            logger.info(f"Retrieved {len(events)} log events from {log_stream_name}")
-            
-            return events
-            
-        except Exception as e:
-            logger.error(f"Error getting log events: {e}")
-            return []
-    
-    def search_logs(self, query, start_time=None, end_time=None, limit=100):
-        """
-        Search logs using CloudWatch Logs Insights.
-        
-        Args:
-            query (str): CloudWatch Logs Insights query
-            start_time (datetime, optional): Start time
-            end_time (datetime, optional): End time
-            limit (int): Maximum number of results to return
-            
-        Returns:
-            dict: Query results
-        """
-        try:
-            # Convert datetime objects to milliseconds since epoch
-            if start_time is None:
-                start_time = datetime.now() - timedelta(hours=1)
-            if end_time is None:
-                end_time = datetime.now()
-                
-            start_time_ms = int(start_time.timestamp() * 1000)
-            end_time_ms = int(end_time.timestamp() * 1000)
-            
-            # Start query
-            start_query_response = self.logs_client.start_query(
-                logGroupName=self.log_group_name,
-                startTime=start_time_ms,
-                endTime=end_time_ms,
-                queryString=query,
-                limit=limit
-            )
-            
-            query_id = start_query_response['queryId']
-            
-            # Wait for query to complete
-            response = None
-            while response is None or response['status'] == 'Running':
-                logger.info("Waiting for query to complete...")
-                time.sleep(1)
-                response = self.logs_client.get_query_results(queryId=query_id)
-                
-            logger.info(f"Query completed with status: {response['status']}")
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error searching logs: {e}")
-            return {'status': 'Failed', 'results': [], 'error': str(e)}
-    
-    def extract_function_calls(self, start_time=None, end_time=None, user_id=None, session_id=None):
-        """
-        Extract function calls from CloudWatch logs.
-        
-        Args:
-            start_time (datetime, optional): Start time
-            end_time (datetime, optional): End time
-            user_id (str, optional): Filter by user ID
-            session_id (str, optional): Filter by session ID
-            
-        Returns:
-            list: List of function calls with details
-        """
-        try:
-            # Build query
-            query = "fields @timestamp, @message | sort @timestamp desc"
-            
-            # Add filters
-            filters = []
-            if user_id:
-                filters.append(f"@message like '{user_id}'")
-            if session_id:
-                filters.append(f"@message like '{session_id}'")
-                
-            # Add function call filter
-            filters.append("@message like 'Invoking function' or @message like 'Function call' or @message like 'Lambda function'")
-            
-            if filters:
-                query += " | filter " + " and ".join(filters)
-                
-            # Execute query
-            response = self.search_logs(query, start_time, end_time)
-            
-            if response['status'] != 'Complete':
-                logger.error(f"Query failed with status: {response['status']}")
-                return []
-                
-            # Parse results to extract function calls
-            function_calls = []
-            for result in response.get('results', []):
-                # Convert result to dict for easier access
-                result_dict = {field['field']: field.get('value', '') for field in result}
-                
-                # Extract timestamp
-                timestamp_str = result_dict.get('@timestamp', '')
-                timestamp = datetime.fromtimestamp(int(timestamp_str) / 1000) if timestamp_str else None
-                
-                # Extract message
-                message = result_dict.get('@message', '')
-                
-                # Parse function name and parameters
-                function_name = None
-                parameters = {}
-                
-                # Different log formats
-                if 'Invoking function' in message:
-                    match = re.search(r'Invoking function: (\w+)', message)
-                    if match:
-                        function_name = match.group(1)
-                        
-                    # Try to extract parameters as JSON
-                    param_match = re.search(r'with parameters: ({.*})', message)
-                    if param_match:
-                        try:
-                            parameters = json.loads(param_match.group(1))
-                        except json.JSONDecodeError:
-                            logger.warning(f"Failed to parse parameters as JSON: {param_match.group(1)}")
-                
-                elif 'Function call' in message:
-                    match = re.search(r'Function call: (\w+)', message)
-                    if match:
-                        function_name = match.group(1)
-                        
-                    # Try to extract parameters
-                    param_match = re.search(r'args: ({.*})', message)
-                    if param_match:
-                        try:
-                            parameters = json.loads(param_match.group(1))
-                        except json.JSONDecodeError:
-                            logger.warning(f"Failed to parse parameters as JSON: {param_match.group(1)}")
-                
-                # Add to function calls if we found a function name
-                if function_name:
-                    function_calls.append({
-                        'timestamp': timestamp,
-                        'function_name': function_name,
-                        'parameters': parameters,
-                        'raw_message': message
-                    })
-            
-            logger.info(f"Extracted {len(function_calls)} function calls")
-            return function_calls
-            
-        except Exception as e:
-            logger.error(f"Error extracting function calls: {e}")
-            return []
 
 def main():
     parser = argparse.ArgumentParser(description="Test audio streaming via WebSocket")
@@ -2346,7 +2100,7 @@ def main():
     parser.add_argument("--password", default=None, help=f"Password for Cognito authentication (default: {ENV_COGNITO_PASSWORD} environment variable)")
     parser.add_argument("--url", default=None, help=f"WebSocket server URL (default: {ENV_SERVER_URL} environment variable)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--client-id", default=None, help="Client ID for WebSocket connection (optional)")
+    parser.add_argument("--session-id", default=None, help="Client ID for WebSocket connection (optional)")
     parser.add_argument("--token", default=None, help="Authentication token (optional)")
     parser.add_argument("--validate-only", action="store_true", help="Only validate audio file format, don't run streaming test")
     parser.add_argument("--delay", type=float, default=2.0, help="Delay in seconds between tests when running multiple files (default: 2.0)")
@@ -2486,7 +2240,7 @@ def main():
                 user_id=user_id,
                 server_url=server_url,
                 debug=args.debug,
-                client_id=args.client_id,
+                session_id=args.session_id,
                 password=password,
                 output_dir=args.output_dir
             ))

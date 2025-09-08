@@ -24,6 +24,7 @@ required_vars=(
   "STACK_ENVIRONMENT"
   "COGNITO_USER_POOL_ID"
   "COGNITO_APP_CLIENT_ID"
+  "COGNITO_IDENTITY_POOL_ID"
   "BD_GUARDRAIL_IDENTIFIER"
   "BD_GUARDRAIL_VERSION"
   "BD_KB_ID"
@@ -33,6 +34,7 @@ required_vars=(
   "WEB_CERTIFICATE_ARN"
   "CERTIFICATE_ARN"
   "EMAIL"
+  "COGNITO_PASSWORD"
 )
 
 for var in "${required_vars[@]}"; do
@@ -558,7 +560,12 @@ echo "Identity Pool ID: $IDENTITY_POOL_ID"
 STORAGE_STACK_NAME="${STACK_NAME}StorageStack"
 S3_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}DataBucketName'].OutputValue" --output text)
 echo "S3 data bucket name: $S3_BUCKET_NAME"
-cat <<EOF | kubectl apply -f -
+# Create a temporary file for the ConfigMap YAML
+CONFIG_MAP_FILE=$(mktemp)
+echo "Creating ConfigMap in temporary file: $CONFIG_MAP_FILE"
+
+# Generate the ConfigMap YAML with proper escaping
+cat > "$CONFIG_MAP_FILE" << EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -577,7 +584,35 @@ data:
   DOMAIN_NAME: "${DOMAIN_NAME}"
   COGNITO_USER_POOL_ID: "${USER_POOL_ID}"
   COGNITO_APP_CLIENT_ID: "${USER_POOL_CLIENT_ID}"
+  COGNITO_IDENTITY_POOL_ID: "${IDENTITY_POOL_ID}"
 EOF
+
+# Add the OpenTelemetry variables with proper YAML escaping
+for var in OTEL_PYTHON_DISTRO OTEL_PYTHON_CONFIGURATOR OTEL_RESOURCE_ATTRIBUTES AGENT_OBSERVABILITY_ENABLED \
+           OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_TRACES_ENDPOINT OTEL_EXPORTER_OTLP_LOGS_HEADERS \
+           OTEL_PYTHON_FASTAPI_EXCLUDED_URLS OTEL_PYTHON_REQUESTS_EXCLUDED_URLS OTEL_PYTHON_URLLIB3_EXCLUDED_URLS \
+           OTEL_PYTHON_HTTPX_EXCLUDED_URLS OTEL_LOG_LEVEL OTEL_PYTHON_LOG_LEVEL AWS_XRAY_DEBUG_MODE \
+           OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED OTEL_PYTHON_DISABLED_INSTRUMENTATIONS \
+           OTEL_PROPAGATORS OTEL_TRACES_SAMPLER OTEL_BSP_SCHEDULE_DELAY OTEL_BSP_MAX_EXPORT_BATCH_SIZE \
+           OTEL_BSP_EXPORT_TIMEOUT AWS_XRAY_TRACING_NAME AWS_XRAY_CONTEXT_MISSING OTEL_PYTHON_LOGGING_LEVEL; do
+    # Get the value with a fallback to empty string
+    value="${!var:-}"
+    
+    # Properly escape the value for YAML
+    # Replace newlines with literal \n, backslashes with double backslashes, and quotes with escaped quotes
+    # Then trim any trailing spaces to avoid issues with string comparison in the application
+    escaped_value=$(echo "$value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/\t/\\t/g' | tr '\n' ' ' | sed 's/ *$//')
+    
+    # Add to the ConfigMap file
+    echo "  $var: \"$escaped_value\"" >> "$CONFIG_MAP_FILE"
+done
+
+# Apply the ConfigMap
+echo "Applying ConfigMap from file..."
+kubectl apply -f "$CONFIG_MAP_FILE"
+
+# Clean up the temporary file
+rm -f "$CONFIG_MAP_FILE"
 
 # Deploy the backend service
 echo "Deploying backend service..."
@@ -692,7 +727,12 @@ echo "Access Logs Bucket Name: $ACCESS_LOGS_BUCKET_NAME"
 
 # Create Ingress with SSL
 echo "Creating Ingress resources with SSL..."
+# Add debug statements to help pinpoint the error
+echo "DEBUG: About to create Ingress YAML"
+echo "DEBUG: ACCESS_LOGS_BUCKET_NAME = $ACCESS_LOGS_BUCKET_NAME"
+
 # Apply the ingress resources and capture the output
+echo "DEBUG: Starting kubectl apply for Ingress"
 INGRESS_OUTPUT=$(kubectl apply -f - <<EOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -716,7 +756,7 @@ metadata:
       routing.http2.enabled=false,
       idle_timeout.timeout_seconds=600,
       access_logs.s3.enabled=true,
-      access_logs.s3.bucket=${ACCESS_LOGS_BUCKET_NAME}
+      access_logs.s3.bucket="${ACCESS_LOGS_BUCKET_NAME}"
     alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-port: "8000"
@@ -751,7 +791,8 @@ spec:
 EOF
 )
 
-echo "$INGRESS_OUTPUT"
+echo "DEBUG: kubectl apply for Ingress completed"
+echo "DEBUG: INGRESS_OUTPUT = $INGRESS_OUTPUT"
 
 # Only wait for ingress provisioning if the resources are being created or configured
 if echo "$INGRESS_OUTPUT" | grep -q "created\|configured"; then
@@ -789,6 +830,9 @@ update_env_var "COGNITO_USER_POOL_ID" "$USER_POOL_ID"
 
 # Update the user pool client id in the .env file
 update_env_var "COGNITO_APP_CLIENT_ID" "$USER_POOL_CLIENT_ID"
+
+# Update the identity pool id in the .env file
+update_env_var "COGNITO_IDENTITY_POOL_ID" "$IDENTITY_POOL_ID"
 
 
 
@@ -968,7 +1012,7 @@ echo "Frontend URL: https://$DOMAIN_NAME"
 echo "--------------------------------"
 echo "Login EMAIL: $EMAIL"
 echo "--------------------------------"
-echo "Login PASSWORD: TempPassword123!"
+echo "Temporary Login PASSWORD: $COGNITO_PASSWORD"
 echo "--------------------------------"
 echo "CloudFront URL: https://$CLOUDFRONT_DOMAIN"
 echo "--------------------------------"

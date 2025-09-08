@@ -4,65 +4,106 @@ This repository contains the backend services for the Retail Store Assistant app
 
 ## Architecture
 
-The application consists of two main backend services:
+The application is a unified FastAPI server that provides:
 
-1. **REST API Server** - Provides RESTful endpoints for the retail store application
-2. **WebSocket Server** - Handles real-time communication for speech-to-speech functionality
+1. **REST API Endpoints** - RESTful endpoints for the retail store application with JWT authentication
+2. **WebSocket Server** - Real-time bidirectional streaming for speech-to-speech functionality using AWS Bedrock Nova Sonic
+3. **Tool Integration** - Comprehensive tool system for retail operations (inventory, scheduling, tasks, recommendations)
+4. **AWS Integration** - Bedrock AI models, DynamoDB storage, S3 image handling, and Cognito authentication
 
-Both servers are containerized together in a single Docker container and can be deployed to Kubernetes.
+The server runs as a single unified service that can be containerized and deployed to Kubernetes.
 
 ## Environment Variables
 
 The following environment variables can be configured:
 
+### Authentication & AWS Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
-| COGNITO_USER_POOL_ID | Cognito User Pool Id | us-east-1_XXXXXXXXX |
-| COGNITO_APP_CLIENT_ID | Cognito App Client id | 1234567890abcdefghijklmnop |
-| AWS_REGION | AWS region | us-east-1 |
-| BEDROCK_MODEL_ID | Bedrock model ID | default_model_id |
-| BD_GUARDRAIL_IDENTIFIER | Guardrail identifier | default_identifier |
-| BD_GUARDRAIL_VERSION | Guardrail version | default_version |
-| BD_KB_ID | Knowledge base ID | default_kb_id |
-| STACK_NAME | Stack name | (required) |
-| STACK_ENVIRONMENT | Stack environment | (required) |
-| S3_BUCKET_NAME | website bucket name | (required) |
+| COGNITO_USER_POOL_ID | AWS Cognito User Pool ID for JWT validation | (required) |
+| COGNITO_IDENTITY_POOL_ID | AWS Cognito Identity Pool ID for temporary credentials | (required) |
+| COGNITO_APP_CLIENT_ID | AWS Cognito App Client ID | (required) |
+| AWS_REGION | AWS region for all services | us-east-1 |
+
+### Bedrock Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| BEDROCK_MODEL_ID | Primary Bedrock model ID | us.anthropic.claude-3-5-haiku-20241022-v1:0 |
+| BD_GUARDRAIL_IDENTIFIER | Bedrock guardrail identifier | default_identifier |
+| BD_GUARDRAIL_VERSION | Bedrock guardrail version | DRAFT |
+| BD_KB_ID | Bedrock Knowledge Base ID | default_kb_id |
+| BEDROCK_MAX_RETRIES | Maximum retry attempts for Bedrock calls | 3 |
+| BEDROCK_BASE_DELAY | Base delay for exponential backoff (seconds) | 1.0 |
+| BEDROCK_MAX_DELAY | Maximum delay for exponential backoff (seconds) | 30.0 |
+| BEDROCK_MIN_REQUEST_INTERVAL | Minimum interval between requests (seconds) | 0.1 |
+
+### Application Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| STACK_NAME | Stack name prefix for DynamoDB tables | (required) |
+| STACK_ENVIRONMENT | Stack environment suffix for DynamoDB tables | (required) |
+| S3_BUCKET_NAME | S3 bucket name for image storage | (required) |
+| PORT | Server port | 8000 |
+| HOST | Server host | 0.0.0.0 |
+| DOMAIN_NAME | Domain name for CORS configuration | * |
+
+### System Prompts
+| Variable | Description | Default |
+|----------|-------------|---------|
+| DEFAUL_SYSTEM_PROMPT | Default system prompt template | (comprehensive retail assistant prompt) |
+
+### Observability (Optional)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| AGENT_OBSERVABILITY_ENABLED | Enable OpenTelemetry tracing | false |
 
 ## Building and Running
 
 ### Local Development
-0. Setup Python environment: 
-   ```
+
+1. Setup Python environment: 
+   ```bash
    pyenv virtualenv 3.12.8 retail-store-assistant
    pyenv activate retail-store-assistant
    ```
-1. Set environment variables:
+
+2. Install dependencies:
+   ```bash
+   python -m pip install -r requirements.txt
    ```
+
+3. Set environment variables (create a `.env` file):
+   ```bash
+   # Authentication
    COGNITO_USER_POOL_ID=us-east-1_XXXXXXXXX
+   COGNITO_IDENTITY_POOL_ID=us-east-1:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
    COGNITO_APP_CLIENT_ID=1234567890abcdefghijklmnop
    AWS_REGION=us-east-1
+   
+   # Bedrock Configuration
    BEDROCK_MODEL_ID="us.anthropic.claude-3-5-haiku-20241022-v1:0"
    BD_GUARDRAIL_IDENTIFIER="XXX"
    BD_GUARDRAIL_VERSION="DRAFT"
    BD_KB_ID="XXX"
+   
+   # Application
    STACK_NAME="retail"
    STACK_ENVIRONMENT="dev"
    S3_BUCKET_NAME="XXX"
+   DOMAIN_NAME="localhost"
+   
+   # AWS Credentials (if not using IAM roles)
    AWS_ACCESS_KEY_ID="XXX"
    AWS_SECRET_ACCESS_KEY="XXX"
    AWS_SESSION_TOKEN="XXX"
    ```
 
-
-2. Install dependencies:
-   ```
-   python -m pip install -r requirements.txt
-   ```
-
-3. Run both servers:
-   ```
+4. Run the unified server:
+   ```bash
    python run_servers.py
    ```
+
+The server will start on `http://localhost:8000` with both REST API and WebSocket endpoints available.
 
 ### Docker
 
@@ -84,35 +125,136 @@ The following environment variables can be configured:
 
 ## API Endpoints
 
-### Endpoints
+All REST API endpoints require JWT authentication via `Authorization: Bearer <token>` header.
 
-- `/api/users` - Get all users
-- `/api/chat` - Chat with the retail assistant
-- `/api/todos` - Get, create, update, and delete todos
-- `/api/store` - Get store information
-- `/api/uploadimage` - Upload an image
-- `/api/feedback` - Add and get feedback
-- `/api/health` - Health check endpoint
+### Authentication
+- **JWT Token Validation**: Uses AWS Cognito for token verification
+- **User Credentials**: Automatically obtains temporary AWS credentials via Cognito Identity Pool
+- **CORS**: Configured for cross-origin requests
 
+### REST API Endpoints
+
+#### Core Functionality
+- `GET /api/chat?query=<text>&userId=<id>&sessionId=<id>` - Chat with the retail assistant
+- `GET /api/reset_chat?userId=<id>&sessionId=<id>` - Reset conversation history and throttling state
+- `POST /api/uploadimage` - Upload images with automatic S3 storage and thumbnail generation
+- `GET /api/images/{image_id}` - Retrieve uploaded images
+
+#### User & Task Management
+- `GET /api/users` - Get all users
+- `GET /api/todos?userId=<id>` - Get tasks for a user
+- `POST /api/todos` - Create a new task
+- `PATCH /api/todos/{userId}/{taskId}` - Update a task
+- `DELETE /api/todos/{userId}/{taskId}` - Delete a task
+
+#### Store Operations
+- `GET /api/store` - Get comprehensive store data (KPIs, departments, inventory alerts)
+- `POST /api/feedback` - Submit feedback
+- `GET /api/feedbacks` - Get all feedback
+
+#### System Monitoring
+- `GET /api/health` - Health check endpoint
+- `GET /api/metrics/throttling` - Get Bedrock API throttling metrics
 
 ### WebSocket Endpoints
 
-- `/ws/{client_id}` - WebSocket endpoint for speech-to-speech functionality
+#### Speech-to-Speech Communication
+- `WS /ws/{session_id}?token=<jwt>&userId=<id>` - Bidirectional streaming for real-time voice interaction
+
+**WebSocket Features:**
+- **Authentication**: JWT token validation on connection
+- **Session Management**: Automatic session lifecycle management
+- **Audio Streaming**: Real-time audio input/output processing
+- **Tool Integration**: Automatic tool calling during conversations
+- **Error Handling**: Graceful error recovery and session cleanup
+
+## Available Tools
+
+The application includes a comprehensive tool system for retail operations:
+
+### Knowledge & Information
+- `search_knowledge_database` - FAQ search across standard operating procedures
+- `get_products` - Product catalog listing
+- `get_product_details` - Specific product information
+- `get_customer_details` - Customer information lookup
+
+### Staff Management
+- `get_schedule` - User schedules (role-based access)
+- `get_timeoff` - Time-off records
+- `add_timeoff` - Time-off requests
+- `list_tasks` - View assigned/created tasks
+- `create_task` - Assign new tasks
+
+### Analytics & Recommendations
+- `generate_store_recommendations` - Daily store recommendations for managers
+- `create_daily_task_suggestions_for_staff` - Staff task planning
+- `customer_recommendation` - Personalized product suggestions
+- `get_image_description` - AI-powered image analysis
+
+## Authentication Flow
+
+1. **JWT Token Validation**: Validates AWS Cognito tokens using JWKS
+2. **User Credential Generation**: Uses Cognito Identity Pool to generate temporary AWS credentials
+3. **Service Access**: Credentials are used for Bedrock, DynamoDB, and S3 operations
+4. **Session Management**: User context is maintained throughout WebSocket sessions
+
+## Data Storage
+
+### DynamoDB Tables
+- `{STACK_NAME}-SESSION-HISTORY-{STACK_ENVIRONMENT}` - Conversation history
+- `{STACK_NAME}-FEEDBACK-{STACK_ENVIRONMENT}` - User feedback
+- `{STACK_NAME}-CUSTOMER_TRANSACTIONS-{STACK_ENVIRONMENT}` - Transaction records
+- `{STACK_NAME}-CUSTOMER-{STACK_ENVIRONMENT}` - Customer information
+- `{STACK_NAME}-TASKLIST-{STACK_ENVIRONMENT}` - Task management
+- `{STACK_NAME}-USERROLE-{STACK_ENVIRONMENT}` - User roles and permissions
+- `{STACK_NAME}-PRODUCTS-{STACK_ENVIRONMENT}` - Product catalog
+- `{STACK_NAME}-TIMEOFF-{STACK_ENVIRONMENT}` - Time-off requests
+- `{STACK_NAME}-SCHEDULE-{STACK_ENVIRONMENT}` - Staff schedules
+- `{STACK_NAME}-DAILY_TASKS_BY_DAY-{STACK_ENVIRONMENT}` - Daily task templates
+- `{STACK_NAME}-IMAGES-{STACK_ENVIRONMENT}` - Image metadata and references
+
+### S3 Storage
+- Images are stored with automatic thumbnail generation
+- Organized by user and session: `images/{userId}/{sessionId}/{timestamp}_{filename}`
+
+## Performance & Reliability
+
+### Rate Limiting & Throttling
+- **Exponential Backoff**: Automatic retry with exponential backoff for Bedrock API calls
+- **Circuit Breaker**: Prevents cascade failures during high throttling
+- **Metrics Tracking**: Comprehensive throttling and performance metrics
+- **Dynamic Rate Limiting**: Adjusts request intervals based on API responses
+
+### Memory Management
+- **Resource Monitoring**: Automatic memory and CPU usage tracking
+- **Garbage Collection**: Forced cleanup during high memory usage
+- **Message History Limits**: Conversation history truncation and summarization
+- **Queue Management**: Proper cleanup of audio and response queues
+
+### Error Handling
+- **Graceful Degradation**: Continues operation during partial failures
+- **Session Recovery**: Automatic session recreation on timeout
+- **Validation Errors**: Proper handling of Bedrock validation exceptions
+- **Connection Management**: Robust WebSocket connection lifecycle
 
 ## Health Checks
 
-The health check endpoint is available at:
-- `http://<host>:8000/health`
+The health check endpoint provides system status:
+- `GET /health` - Returns server health, AWS configuration status, and timestamp
+- Used by Kubernetes liveness and readiness probes
+- Includes AWS credential validation (non-blocking)
 
+## Observability
 
+### OpenTelemetry Integration
+- **Distributed Tracing**: Full request tracing across services
+- **Session Tracking**: Complete session lifecycle monitoring  
+- **Tool Usage Tracking**: Individual tool execution spans
+- **Token Usage Metrics**: Cost and usage tracking per session
+- **Error Tracking**: Comprehensive error and exception tracking
 
-# AWS Credentials Script for Kubernetes Pods
-
-Currently the Bedrock Sonic Python SDK requires AWS environment variables for authentication. That is why we use the aws_credentials.py script as a workaround to automatically obtain AWS credentials using the pod's service account.
-
-The script:
-1. Reads the service account token from the pod
-2. Uses the token to assume the IAM role associated with the service account
-3. Sets the AWS credentials as environment variables or writes them to a file
-
-It is invoked as part of run_servers.py as part of the run_aws_credentials_refresh() method.
+### Logging
+- **Structured Logging**: JSON-formatted logs with context
+- **Performance Metrics**: Request duration and resource usage
+- **Security Events**: Authentication and authorization logging
+- **Health Check Filtering**: Reduced noise from health check requests

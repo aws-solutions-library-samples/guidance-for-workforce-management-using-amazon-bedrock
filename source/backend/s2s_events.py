@@ -5,7 +5,7 @@ class S2sEvent:
   DEFAULT_INFER_CONFIG = {
         "maxTokens": 1024,
         "topP": 0.95,
-        "temperature": 0.7
+        "temperature": 0
     }
 
   DEFAULT_SYSTEM_PROMPT = "You are a friendly assistant. The user and you will engage in a spoken dialog " \

@@ -69,17 +69,18 @@ export class AuthStack extends cdk.Stack {
       messageAction: 'SUPPRESS', // Don't send welcome email
     });
 
-    // Note: Group assignment will need to be done manually or through the application
-    // due to CloudFormation limitations with user creation timing
-
     // Create Lambda function to set up the user properly
     const userSetupFunction = new lambda.Function(this, `${resourcePrefix}-UserSetupFunction`, {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
+      environment: {
+        COGNITO_PASSWORD: process.env.COGNITO_PASSWORD || 'TempPassword123!'
+      },
       code: lambda.Code.fromInline(`
 import json
 import boto3
 import cfnresponse
+import os
 
 def handler(event, context):
     try:
@@ -92,13 +93,16 @@ def handler(event, context):
         username = event['ResourceProperties']['Username']
         group_name = event['ResourceProperties']['GroupName']
         
+        # Get password from environment variable or use default
+        password = os.environ.get('COGNITO_PASSWORD', 'TempPassword123!')
+        
         # Set user password to confirmed state
         try:
             cognito.admin_set_user_password(
                 UserPoolId=user_pool_id,
                 Username=username,
-                Password='TempPassword123!',
-                Permanent=False
+                Password=password,
+                Permanent=True  # Make the password permanent so users can sign in directly
             )
         except Exception as e:
             print(f"Password setting failed (user might not exist yet): {e}")
@@ -172,7 +176,7 @@ def handler(event, context):
     new cdk.CfnOutput(this, `${resourcePrefix}-IdentityPoolId`, {
       value: this.identityPool.ref,
     });
-
+    
     // Output the created user email
     new cdk.CfnOutput(this, `${resourcePrefix}-InitialUserEmail`, {
       value: props.emailAddress,
@@ -195,14 +199,19 @@ def handler(event, context):
       ),
       description: 'IAM role for authenticated Cognito users',
     });
-    
-    // Only allow STS permissions for identity verification
+
+    // Only allow STS permissions for identity verification with specific condition
     this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'sts:GetCallerIdentity'
       ],
-      resources: ['*']
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
     }));
 
     // Minimal Cognito permissions for user management
@@ -216,6 +225,164 @@ def handler(event, context):
         `arn:aws:cognito-identity:${this.region}:${this.account}:identitypool/${this.identityPool.ref}`
       ]
     }));
+    
+    // Add specific EKS permissions for cluster access
+    // These permissions are needed for the EKS access entry in the EKS stack
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'eks:DescribeCluster',
+        'eks:AccessKubernetesApi'
+      ],
+      resources: [
+        `arn:aws:eks:${this.region}:${this.account}:cluster/${resourcePrefix}-cluster`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // Add specific permissions for ECR to allow pulling images
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:BatchGetImage',
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:GetAuthorizationToken'
+      ],
+      resources: [
+        `arn:aws:ecr:${this.region}:${this.account}:repository/${resourcePrefix}-backend`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // GetAuthorizationToken requires a wildcard resource
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ecr:GetAuthorizationToken'
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // Add specific permissions for S3 buckets - including write permissions for image uploads
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetObject',
+        's3:PutObject',
+        's3:DeleteObject',
+        's3:ListBucket',
+        's3:GetBucketLocation',
+        's3:HeadBucket'
+      ],
+      resources: [
+        `arn:aws:s3:::${resourcePrefix}-databucket*`,
+        `arn:aws:s3:::${resourcePrefix}-databucket*/*`,
+        // Also allow access to the actual bucket name pattern used by CDK
+        `arn:aws:s3:::*${resourcePrefix.toLowerCase()}*databucket*`,
+        `arn:aws:s3:::*${resourcePrefix.toLowerCase()}*databucket*/*`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // Add specific permissions for Bedrock
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream'
+      ],
+      resources: [
+        // Foundation models - specific to commonly used models
+        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-*`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // Add specific permissions for Bedrock Guardrails
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:ApplyGuardrail'
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
+        `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/*`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // Add specific permissions for Knowledge Base retrieval
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:Retrieve'
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:knowledge-base/*`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
+    
+    // Add specific permissions for DynamoDB tables
+    const environment = props.environment || 'DEV';
+    this.authenticatedRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+        'dynamodb:Scan'
+      ],
+      resources: [
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-USERROLE-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-SESSION-HISTORY-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-TASKLIST-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-CUSTOMER-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-DAILY_TASKS_BY_DAY-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-SCHEDULE-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-TIMEOFF-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-PRODUCTS-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-CUSTOMER_TRANSACTIONS-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-FEEDBACK-${environment}`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${resourcePrefix}-IMAGES-${environment}`
+      ],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': this.region
+        }
+      }
+    }));
 
     // Attach roles to the Identity Pool
     new cognito.CfnIdentityPoolRoleAttachment(this, 'IdentityPoolRoleAttachment', {
@@ -225,4 +392,4 @@ def handler(event, context):
       },
     });
   }
-} 
+}

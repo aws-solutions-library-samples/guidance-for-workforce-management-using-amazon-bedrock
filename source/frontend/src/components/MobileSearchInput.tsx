@@ -5,10 +5,10 @@ import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 import SendIcon from '@mui/icons-material/Send';
 import CameraAltIcon from '@mui/icons-material/CameraAlt';
+import StopIcon from '@mui/icons-material/Stop';
 import { styled, keyframes } from '@mui/material/styles';
 import { useAudio, useMessages, useWebSocketConnection, useS2S, useAuth } from '../context';
 import { fetchWithAuth } from '../config';
-import { DefaultSystemPrompt } from '../consts';
 
 interface MobileSearchInputProps {
   onSend: (message: string) => void;
@@ -131,7 +131,7 @@ const MobileSearchInput: React.FC<MobileSearchInputProps> = ({
   
   // Get context hooks
   const { userId,sessionId } = useAuth();
-  const { isStreaming, startStreaming, stopStreaming, onAudioData } = useAudio();
+  const { isStreaming, startStreaming, stopStreaming, onAudioData, isMuted, toggleMute } = useAudio();
   const { isLoading, addSystemMessage, addMessage } = useMessages();
   const { isConnected, connect, connectionError } = useWebSocketConnection();
   
@@ -393,9 +393,30 @@ const MobileSearchInput: React.FC<MobileSearchInputProps> = ({
     }
   }, [userId, sessionId, addMessage, addSystemMessage]);
 
+  // Simple mute toggle without complex state verification
+  const handleMuteToggle = useCallback(() => {
+    // Call toggleMute from context - the context now handles state synchronization properly
+    toggleMute();
+    
+    // Update the button's data attribute for immediate UI feedback
+    const muteButton = document.querySelector('[data-muted]');
+    if (muteButton) {
+      // We can safely use the negation of the current attribute value
+      // since this will be updated before the next render
+      const currentValue = muteButton.getAttribute('data-muted') === 'true';
+      muteButton.setAttribute('data-muted', (!currentValue).toString());
+    }
+  }, [toggleMute]);
+
   // Audio data subscription
   useEffect(() => {
     const unsubscribe = onAudioData((audioData) => {
+      // If muted, don't process the audio data
+      if (isMuted) {
+        // Return empty audio data when muted
+        return;
+      }
+      
       // Animate visualizer based on audio levels
       if (showVisualizer && audioVisualizerRef.current) {
         // Update visualizer based on audio levels (you could implement more sophisticated visualization)
@@ -408,7 +429,7 @@ const MobileSearchInput: React.FC<MobileSearchInputProps> = ({
     });
     
     return unsubscribe;
-  }, [onAudioData, showVisualizer]);
+  }, [onAudioData, showVisualizer, isMuted]);
 
   // Keep UI in sync with streaming state
   useEffect(() => {
@@ -500,14 +521,22 @@ const MobileSearchInput: React.FC<MobileSearchInputProps> = ({
                 </IconButtonStyled>
               </span>
             </Tooltip>
-            <Tooltip title={isStreaming ? "Stop recording" : "Start voice input"}>
+            {isStreaming && (
+              <Tooltip title={isMuted ? "Unmute Microphone" : "Mute Microphone"}>
+                <span>
+                  <IconButtonStyled 
+                    onClick={handleMuteToggle}
+                    data-muted={isMuted ? "true" : "false"}
+                  >
+                    {isMuted ? <MicOffIcon color="error" /> : <ActiveMicIcon />}
+                  </IconButtonStyled>
+                </span>
+              </Tooltip>
+            )}
+            <Tooltip title={isStreaming ? "Stop voice session" : "Start voice input"}>
               <span>
                 <IconButtonStyled onClick={handleMicPress} disabled={disabled || isLoading}>
-                  {isStreaming ? (
-                    <ActiveMicIcon />
-                  ) : (
-                    isAudioEnabled ? <MicIcon /> : <MicOffIcon />
-                  )}
+                  {isStreaming ? <StopIcon color="primary" /> : (isAudioEnabled ? <MicIcon /> : <MicOffIcon />)}
                 </IconButtonStyled>
               </span>
             </Tooltip>
@@ -518,4 +547,4 @@ const MobileSearchInput: React.FC<MobileSearchInputProps> = ({
   );
 };
 
-export default MobileSearchInput; 
+export default MobileSearchInput;

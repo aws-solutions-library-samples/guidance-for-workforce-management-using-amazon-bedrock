@@ -110,10 +110,10 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
       switch (type) {
         case 'audio':
           if (!audioData || audioData.length === 0) {
-            console.log('[AudioPlayerProcessor] Received empty audio data');
+            // console.log('[AudioPlayerProcessor] Received empty audio data');
             return;
           }
-          console.log('[AudioPlayerProcessor] Received audio data, length:', audioData.length);
+          // console.log('[AudioPlayerProcessor] Received audio data, length:', audioData.length);
           
           // Create a new buffer with enough space for the new data
           const newBuffer = new Float32Array(this.buffer.length + audioData.length);
@@ -121,16 +121,16 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
           newBuffer.set(audioData, this.buffer.length);
           this.buffer = newBuffer;
           
-          console.log('[AudioPlayerProcessor] Buffer state after write:', {
-            bufferLength: this.buffer.length,
-            writeIndex: this.writeIndex,
-            readIndex: this.readIndex,
-            isInitialBuffering: this.isInitialBuffering
-          });
+          // console.log('[AudioPlayerProcessor] Buffer state after write:', {
+          //   bufferLength: this.buffer.length,
+          //   writeIndex: this.writeIndex,
+          //   readIndex: this.readIndex,
+          //   isInitialBuffering: this.isInitialBuffering
+          // });
           break;
           
         case 'reset':
-          console.log('[AudioPlayerProcessor] Resetting playback');
+          // console.log('[AudioPlayerProcessor] Resetting playback');
           this.buffer = new Float32Array(0);
           this.writeIndex = 0;
           this.readIndex = 0;
@@ -140,7 +140,7 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
           break;
           
         case 'stop':
-          console.log('[AudioPlayerProcessor] Stopping playback');
+          // console.log('[AudioPlayerProcessor] Stopping playback');
           this.isForceStop = true;
           break;
           
@@ -151,7 +151,7 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
           
         case 'initial-buffer-length':
           if (bufferLength && !isNaN(bufferLength)) {
-            console.log('[AudioPlayerProcessor] Setting initial buffer length:', bufferLength);
+            // console.log('[AudioPlayerProcessor] Setting initial buffer length:', bufferLength);
             this.initialBufferLength = bufferLength;
           }
           break;
@@ -176,7 +176,7 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
 
     // Check if we have enough data to start playback
     if (this.isInitialBuffering && this.buffer.length >= this.initialBufferLength) {
-      console.log('[AudioPlayerProcessor] Initial buffering complete, starting playback');
+      // console.log('[AudioPlayerProcessor] Initial buffering complete, starting playback');
       this.isInitialBuffering = false;
     }
 
@@ -188,7 +188,7 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
 
     // Handle barge-in by clearing the buffer
     if (this.isBargeIn) {
-      console.log('[AudioPlayerProcessor] Clearing buffer due to barge-in');
+      // console.log('[AudioPlayerProcessor] Clearing buffer due to barge-in');
       this.buffer = new Float32Array(0);
       this.writeIndex = 0;
       this.readIndex = 0;
@@ -208,7 +208,7 @@ class AudioPlayerProcessor extends AudioWorkletProcessor {
       
       // If we've read all the data, reset the buffer
       if (this.readIndex >= this.buffer.length) {
-        console.log('[AudioPlayerProcessor] Buffer depleted, resetting');
+        // console.log('[AudioPlayerProcessor] Buffer depleted, resetting');
         this.buffer = new Float32Array(0);
         this.writeIndex = 0;
         this.readIndex = 0;

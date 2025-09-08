@@ -106,8 +106,10 @@ const eksStack = new EksStack(app, `${stackName}EksStack`, {
   resourcePrefix: stackName,
   environment: envName,
   vpc: infraStack.vpc,
-  domainName,
-  certificateArn,
+  authenticatedRole: authStack.authenticatedRole,
+  domainName: domain,
+  certificateArn: certArn,
+  terminationProtection: false,
   dataBucket: storageStack.dataBucket,
   description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - EKS cluster and backend resources'
 });

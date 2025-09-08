@@ -20,7 +20,7 @@ from pathlib import Path
 from botocore.exceptions import ClientError
 
 # Default path to validation dataset
-DEFAULT_VALIDATION_DATASET_PATH = "data/function_calling_validation_dataset.jsonl"
+DEFAULT_VALIDATION_DATASET_PATH = "data/text_validation_dataset.jsonl"
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
@@ -43,8 +43,8 @@ def find_dotenv():
         Path('.env'),
         # Parent directory (for when running from a subdirectory)
         Path('..') / '.env',
-        # Deployment directory 
-        Path('..') / 'deployment' / '.env',
+        Path('..') / 'deployment' /'.env',
+        Path('..') / 'source' / 'frontend' / '.env',
         # From the current working directory
         Path(os.getcwd()) / '.env',
         # From the parent of the current working directory
@@ -53,6 +53,7 @@ def find_dotenv():
     
     # Try each path
     for path in possible_paths:
+        # logger.debug(f"Checking for .env file at: {path.absolute()}")
         if path.exists():
             logger.info(f"Found .env file at: {path.absolute()}")
             return path
@@ -61,6 +62,32 @@ def find_dotenv():
     logger.warning("No .env file found in any of the expected locations")
     return None
 
+def find_frontend_env():
+    """
+    Find the frontend .env file by looking in several possible locations.
+    
+    Returns:
+        Path: Path to the frontend .env file
+    """
+    # Try different possible locations for the .env file
+    possible_paths = [
+        # Frontend directory
+        Path('source/frontend/.env'),
+        # From the current working directory
+        Path(os.getcwd()) / 'source' / 'frontend' / '.env',
+        # From the parent of the current working directory
+        Path(os.getcwd()).parent / 'source' / 'frontend' / '.env',
+    ]
+    
+    # Try each path
+    for path in possible_paths:
+        if path.exists():
+            logger.info(f"Found frontend .env file at: {path.absolute()}")
+            return path
+    
+    # If no .env file is found, log a warning and return None
+    logger.warning("No frontend .env file found in any of the expected locations")
+    return None
 
 def update_cognito_client(profile_name=None):
     """
@@ -77,8 +104,8 @@ def update_cognito_client(profile_name=None):
     if env_path:
         load_dotenv(dotenv_path=env_path)
     
-    user_pool_id = os.getenv('COGNITO_USER_POOL_ID')
-    client_id = os.getenv('COGNITO_APP_CLIENT_ID')
+    user_pool_id = os.getenv('COGNITO_USER_POOL_ID') or os.getenv('VITE_USER_POOL_ID')
+    client_id = os.getenv('COGNITO_APP_CLIENT_ID') or os.getenv('VITE_USER_POOL_CLIENT_ID')
     region = os.getenv('AWS_REGION', 'us-east-1')
     
     try:
@@ -94,20 +121,19 @@ def update_cognito_client(profile_name=None):
         
         logger.info("=== Updating Cognito App Client ===")
         
-        # Update the client with required auth flows
+        # Update the client with required auth flows - using USER_PASSWORD_AUTH like the frontend
         response = cognito_client.update_user_pool_client(
             UserPoolId=user_pool_id,
             ClientId=client_id,
             ExplicitAuthFlows=[
-                'ALLOW_USER_PASSWORD_AUTH',
-                'ALLOW_ADMIN_USER_PASSWORD_AUTH',
-                'ALLOW_REFRESH_TOKEN_AUTH',
-                'ALLOW_USER_SRP_AUTH',
+                'ALLOW_USER_PASSWORD_AUTH',  # Primary auth flow (same as frontend)
+                'ALLOW_REFRESH_TOKEN_AUTH',  # For token refresh
+                'ALLOW_USER_SRP_AUTH',       # For SRP authentication
             ]
         )
         
         logger.info("✅ Successfully updated Cognito App Client!")
-        logger.info("Enabled auth flows: ALLOW_USER_PASSWORD_AUTH, ALLOW_ADMIN_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH")
+        logger.info("Enabled auth flows: ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH, ALLOW_USER_SRP_AUTH")
         
         return True
         
@@ -172,6 +198,7 @@ class CognitoAuthenticator:
     def authenticate_with_password(self, username, password):
         """
         Authenticate with username and password to get JWT tokens.
+        Uses the same authentication flow as the frontend (USER_PASSWORD_AUTH).
         
         Args:
             username (str): Username (email)
@@ -181,10 +208,10 @@ class CognitoAuthenticator:
             dict: Authentication result with tokens
         """
         try:
-            response = self.cognito_client.admin_initiate_auth(
-                UserPoolId=self.user_pool_id,
+            # First try USER_PASSWORD_AUTH (same as frontend)
+            response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
-                AuthFlow='ADMIN_NO_SRP_AUTH',
+                AuthFlow='USER_PASSWORD_AUTH',
                 AuthParameters={
                     'USERNAME': username,
                     'PASSWORD': password
@@ -221,6 +248,8 @@ class CognitoAuthenticator:
                 raise ValueError(f"User not found: {error_message}")
             elif error_code == 'UserNotConfirmedException':
                 raise ValueError(f"User not confirmed: {error_message}")
+            elif error_code == 'InvalidParameterException' and 'Auth flow not enabled' in error_message:
+                raise ValueError(f"Auth flow not enabled: {error_message}. Please ensure ALLOW_USER_PASSWORD_AUTH is enabled for your Cognito App Client.")
             else:
                 raise ValueError(f"Authentication error ({error_code}): {error_message}")
     
@@ -235,8 +264,7 @@ class CognitoAuthenticator:
             raise ValueError("No refresh token available. Please authenticate again.")
         
         try:
-            response = self.cognito_client.admin_initiate_auth(
-                UserPoolId=self.user_pool_id,
+            response = self.cognito_client.initiate_auth(
                 ClientId=self.client_id,
                 AuthFlow='REFRESH_TOKEN_AUTH',
                 AuthParameters={
@@ -333,8 +361,30 @@ class RetailRestApiClient:
         self.cognito_client_id = cognito_client_id or os.getenv('COGNITO_APP_CLIENT_ID')
         self.region = region or os.getenv('AWS_REGION', 'us-east-1')
         
-        RESTAPI_URL = f'https://backend.{os.getenv("DOMAIN_NAME")}/api'
-        self.api_url = api_url or RESTAPI_URL
+        # Load frontend .env file to get VITE_WEBSOCKET_URL
+        frontend_env_path = find_frontend_env()
+        rest_url = None
+        
+        if frontend_env_path:
+            # Load the frontend .env file
+            with open(frontend_env_path, 'r') as f:
+                for line in f:
+                    if line.startswith('VITE_RESTAPI_URL='):
+                        rest_url = line.strip().split('=', 1)[1]
+                        # Remove quotes if present
+                        if rest_url.startswith('"') and rest_url.endswith('"'):
+                            rest_url = rest_url[1:-1]
+                        elif rest_url.startswith("'") and rest_url.endswith("'"):
+                            rest_url = rest_url[1:-1]
+                        break
+            
+            if rest_url:
+                logger.info(f"Using VITE_RESTAPI_URL from frontend .env: {rest_url}")
+            else:
+                logger.warning("VITE_RESTAPI_URL not found in frontend .env file")
+
+        # RESTAPI_URL = f'https://backend.{os.getenv("DOMAIN_NAME")}/api'
+        self.api_url = rest_url
         self.debug = debug
         
         if self.debug:
@@ -422,8 +472,8 @@ class RetailRestApiClient:
             # Record start time
             start_time = time.time()
     
-            # Send the GET request with a timeout of 240 seconds
-            response = requests.get(endpoint, headers=headers, params=payload, timeout=240)
+            # Send the GET request with increased timeout to handle backend processing delays
+            response = requests.get(endpoint, headers=headers, params=payload, timeout=300)
             
             # Check if the request was successful
             response.raise_for_status()
@@ -452,7 +502,7 @@ class RetailRestApiClient:
                 logger.error(f"Response status code: {e.response.status_code}")
                 logger.error(f"Response text: {e.response.text}")
                 
-                # Handle authentication errors
+                # Handle authentication errors with improved retry logic
                 if e.response.status_code == 401:
                     logger.info("Authentication failed, attempting to refresh tokens...")
                     try:
@@ -461,12 +511,35 @@ class RetailRestApiClient:
                         # Retry the request with new token
                         jwt_token = self.authenticator.get_valid_token('id')
                         headers['Authorization'] = f'Bearer {jwt_token}'
-                        response = requests.get(endpoint, headers=headers, params=payload, timeout=120)
+                        
+                        # Record retry start time
+                        retry_start_time = time.time()
+                        response = requests.get(endpoint, headers=headers, params=payload, timeout=300)
                         response.raise_for_status()
-                        return response.json()
+                        
+                        # Parse retry response
+                        retry_response_data = response.json()
+                        
+                        # Calculate total duration including retry
+                        total_duration_ms = (time.time() - start_time) * 1000
+                        retry_response_data['request_duration_ms'] = round(total_duration_ms, 2)
+                        retry_response_data['retry_attempted'] = True
+                        
+                        return retry_response_data
                     except Exception as refresh_error:
                         logger.error(f"Token refresh failed: {refresh_error}")
                         raise ValueError("Authentication failed and token refresh unsuccessful. Please authenticate again.")
+                
+                # Handle rate limiting errors
+                elif e.response.status_code == 429:
+                    logger.warning("Rate limited by API, waiting before retry...")
+                    time.sleep(5)  # Wait 5 seconds before retry
+                    raise ValueError("API rate limit exceeded. Please try again later.")
+                
+                # Handle server errors
+                elif e.response.status_code >= 500:
+                    logger.error(f"Server error {e.response.status_code}: {e.response.text}")
+                    raise ValueError(f"Server error: {e.response.status_code}")
             raise
             
     def reset_chat(self, session_id=None):
@@ -571,7 +644,7 @@ class RetailRestApiClient:
             raise
 
 
-def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_number=1, model='nova_pro'):
+def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_number=1, model='nova_pro', aws_profile=None):
     """
     Run a single test loop for function calling with all validation dataset queries
     
@@ -579,13 +652,14 @@ def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_numbe
         dataset_path (str): Path to the validation dataset JSONL file
         run_number (int): The current run number (for logging and directory naming)
         model (str): Model name to use for the test
+        aws_profile (str, optional): AWS profile name to use for credentials
         
     Returns:
         dict: Results and statistics from this test run
     """
     # Update Cognito client and create API client
-    update_cognito_client(profile_name='team')
-    client = RetailRestApiClient(debug=True, aws_profile="team")
+    update_cognito_client(profile_name=aws_profile)
+    client = RetailRestApiClient(debug=True, aws_profile=aws_profile)
     
     # Define session ID
     session_id = f'test-run-{run_number}-{uuid.uuid4()}'
@@ -621,21 +695,26 @@ def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_numbe
             response = client.send_query(query, session_id)
             print(f"Response: {response}")
             
-            # Increase request timeout - the logs show processing taking around 45 seconds
-            # Add a max retries mechanism with increasing wait times
-            max_retries = 5
+            # Enhanced retry mechanism with exponential backoff for backend processing delays
+            max_retries = 3
             retries = 0
-            wait_time = 30  # Start with 30 seconds
+            wait_time = 10  # Start with 10 seconds
             
             while retries < max_retries and not response.get('chat_response'):
                 logger.info(f"Response doesn't contain chat_response yet. Waiting {wait_time} seconds and retrying...")
                 time.sleep(wait_time)
-                # Try fetching the response again with the same query
-                response = client.send_query(query, session_id)
-                print(f"Retry {retries+1} response: {response}")
+                
+                try:
+                    # Try fetching the response again with the same query
+                    response = client.send_query(query, session_id)
+                    print(f"Retry {retries+1} response: {response}")
+                except Exception as retry_error:
+                    logger.warning(f"Retry {retries+1} failed: {retry_error}")
+                    # Continue with the retry loop even if this attempt fails
+                    
                 retries += 1
-                # Increase wait time for next retry
-                wait_time = min(wait_time * 2, 120)  # Double the wait time, max 60 seconds
+                # Exponential backoff with jitter
+                wait_time = min(wait_time * 1.5 + (retries * 2), 60)  # Max 60 seconds
 
             
             # Get category from test case
@@ -650,7 +729,8 @@ def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_numbe
                 'expected_function': expected_function,
                 'expected_response': expected_response,
                 'category': category,
-                'status': 'success'
+                'status': 'success',
+                'session_id': session_id
             }
             successful_queries += 1
             
@@ -667,7 +747,8 @@ def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_numbe
                 'expected_response': expected_response,
                 'category': category,
                 'status': 'error',
-                'error_message': str(e)
+                'error_message': str(e),
+                'session_id': session_id
             }
             failed_queries += 1
         
@@ -724,7 +805,7 @@ def run_single_test_loop(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, run_numbe
         'stats': run_stats
     }
 
-def run_test_cases(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, num_runs=1, delay_between_runs=5.0, model='nova_pro', category_filter=None):
+def run_test_cases(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, num_runs=1, delay_between_runs=5.0, model='nova_pro', category_filter=None, aws_profile=None):
     """
     Run the test cases with Nova Pro as reasoning model for function calling
     
@@ -733,6 +814,8 @@ def run_test_cases(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, num_runs=1, del
         num_runs (int): Number of times to run the test loop
         delay_between_runs (float): Delay in seconds between test loop runs
         model (str): Model name to use for the test
+        category_filter (str, optional): Filter test cases by category
+        aws_profile (str, optional): AWS profile name to use for credentials
         
     Returns:
         dict: Results from all test runs and overall statistics
@@ -785,7 +868,8 @@ def run_test_cases(dataset_path=DEFAULT_VALIDATION_DATASET_PATH, num_runs=1, del
         run_result = run_single_test_loop(
             dataset_path=run_dataset_path,
             run_number=run_number,
-            model=model
+            model=model,
+            aws_profile=aws_profile
         )
         
         # Remove temporary filtered dataset if it was created
@@ -953,6 +1037,8 @@ if __name__ == "__main__":
                       help="Filter test cases by category (e.g., 'Operations', 'Personalization', 'HR')")
     parser.add_argument("--list-categories", action="store_true",
                       help="List all categories in the validation dataset and exit")
+    parser.add_argument("--aws-profile", type=str, default=None,
+                      help="AWS profile name to use for credentials (default: use default credentials)")
     
     args = parser.parse_args()
     
@@ -969,5 +1055,6 @@ if __name__ == "__main__":
         num_runs=args.num_runs,
         delay_between_runs=args.delay,
         model=args.model,
-        category_filter=args.category
+        category_filter=args.category,
+        aws_profile=args.aws_profile
     )

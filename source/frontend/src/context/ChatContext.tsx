@@ -1,13 +1,8 @@
 import React, { createContext, useContext, useRef, useEffect, useCallback, useState, useMemo, FC, ReactNode } from 'react';
 import { WEBSOCKET_URL, fetchWithAuth } from '../config';
 import { useAuth } from './AuthContext';
-import {
-  DefaultInferenceConfiguration,
-  DefaultTextConfiguration,
-  DefaultAudioOutputConfiguration,
-  DefaultAudioInputConfiguration,
-  DefaultSystemPrompt
-} from '../consts';
+import { DefaultAudioInputConfiguration } from '../consts';
+import { cleanupOldUnscopedKeys, cleanupOldestSessions } from '../utils/localStorage';
 
 
 // @ts-ignore
@@ -72,6 +67,8 @@ interface ChatContextType {
   stopStreaming: () => void;
   onAudioData: (callback: (audioData: Int16Array) => void) => () => void;
   resetContent: () => Promise<void>;
+  isMuted: boolean;
+  toggleMute: () => void;
 
   
   // S2S Protocol Related
@@ -106,14 +103,12 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
-  // const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
   const streamOptionsRef = useRef<AudioStreamOptions>({});
 
-  // Add missing refs for content tracking
   const contentStartRef = useRef<Record<string, {generationStage?: string, role: string, type: string}>>({});
   
   // Add promptName state to fix linter error
@@ -129,12 +124,20 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   // Message state
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const isMutedRef = useRef(false); // Add ref for immediate access to mute state
   
+  // Helper function for scoped chat storage
+  const getChatStorageKey = useCallback(() => {
+    if (!userId || !sessionId) return null;
+    return `chatMessages_${userId}_${sessionId}`;
+  }, [userId, sessionId]);
+
   // Chat message history
   const [textStream, setTextStream] = useState<string[]>(() => {
-    // Initialize from localStorage if available
-    const saved = localStorage.getItem('chatMessages');
-    return saved ? JSON.parse(saved) : [];
+    // Initialize from localStorage if available and user/session are set
+    // Note: This will be empty initially until userId/sessionId are available
+    return [];
   });
   
   // Text response data storage - matching audio approach
@@ -171,12 +174,12 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   const audioDataCallbacksRef = useRef<Set<(audioData: Int16Array) => void>>(new Set());
   
   const onAudioData = useCallback((callback: (audioData: Int16Array) => void) => {
-    console.log('[Audio] Adding audio data callback');
+    // console.log('[Audio] Adding audio data callback');
     audioDataCallbacksRef.current.add(callback);
     
     // Return a function to unsubscribe
     return () => {
-      console.log('[Audio] Removing audio data callback');
+      // console.log('[Audio] Removing audio data callback');
       audioDataCallbacksRef.current.delete(callback);
     };
   }, []);
@@ -211,17 +214,17 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   const initAudio = useCallback(async () => {
     // Prevent double initialization in StrictMode
     if (audioPlayerRef.current) {
-      console.log('[Audio] AudioPlayer already initialized');
+      // console.log('[Audio] AudioPlayer already initialized');
       return;
     }
     
     try {
-      console.log('Initializing AudioPlayer...');
+      // console.log('Initializing AudioPlayer...');
       const player = new AudioPlayer();
       await player.start();
       player.onAudioData = processAudio;
       audioPlayerRef.current = player;
-      console.log('AudioPlayer initialized successfully');
+      // console.log('AudioPlayer initialized successfully');
     } catch (error) {
       console.error('Failed to initialize AudioPlayer:', error);
     }
@@ -283,7 +286,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
         float32Array[i] = int16Array[i] / 32768.0;
       }
       
-      console.log(`[Audio] Converted base64 to Float32Array of length: ${float32Array.length}`);
+      // console.log(`[Audio] Converted base64 to Float32Array of length: ${float32Array.length}`);
       return float32Array;
     } catch (error) {
       console.error('[Audio] Error converting base64 to Float32Array:', error);
@@ -363,13 +366,15 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   const handleMessage = useCallback((event: MessageEvent) => {
     try {
       const data = JSON.parse(event.data);
-      console.log('[WebSocket] Received message:', data);
+      // console.log('[WebSocket] Received message:', data);
 
       // Process event-based protocol
-      const eventType = Object.keys(data.event)[0];
+      // Check if data.event exists and is an object
+      if (data.event && typeof data.event === 'object') {
+        const eventType = Object.keys(data.event)[0];
 
-      // Handle different message types
-      switch (eventType) {
+        // Handle different message types
+        switch (eventType) {
         case 'contentStart':
           console.log('[WebSocket][S2S] Content start received:', data.event.contentStart);
           const contentStartEvent = data.event.contentStart;
@@ -426,10 +431,11 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
           const generationStage = contentStartInfo?.generationStage;
           const role = contentStartInfo?.role?.toLowerCase() || 'assistant';
 
-          // Only process FINAL messages, ignore SPECULATIVE completely
-          if (generationStage !== 'FINAL') {
-            console.log(`[Messages][S2S] Ignoring ${generationStage} message for ${textContentId}`);
-            break;
+          // Process both FINAL and SPECULATIVE messages for audio interactions
+          if (generationStage !== 'FINAL' && generationStage !== undefined) {
+            console.log(`[Messages][S2S] Processing ${generationStage} message for ${textContentId}`);
+            // We still want to display SPECULATIVE messages during audio interactions
+            // No need to break here, continue processing to display the message
           }
 
           console.log(`[Messages][S2S] Processing FINAL ${role} message for ${textContentId}`);
@@ -455,8 +461,11 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
               const roleMatch = lastMessage.match(/data-message-role="([^"]+)"/);
               const lastRole = roleMatch ? roleMatch[1] : null;
               
-              // If same role, append to the existing message
-              if (lastRole === role) {
+              // Check if the last message contains an image (indicating it's an image upload)
+              const containsImage = lastMessage.includes('<img') || lastMessage.includes('![') || lastMessage.includes('Image uploaded successfully');
+              
+              // If same role but the last message contains an image, create a new message instead of appending
+              if (lastRole === role && !containsImage) {
                 console.log(`[Messages][S2S] Appending to existing ${role} message`);
                 
                 // Extract existing text content safely using DOMParser
@@ -492,19 +501,19 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
           break;
 
         case 'audioOutput':
-          console.log('[WebSocket][S2S] Audio output received:', data.event.audioOutput);
+          // console.log('[WebSocket][S2S] Audio output received:', data.event.audioOutput);
           if (audioPlayerRef.current) {
             audioPlayerRef.current.playAudio(base64ToFloat32Array(
               data.event.audioOutput.content
             ));
-            console.log('[WebSocket][S2S] Audio output played');
+            // console.log('[WebSocket][S2S] Audio output played');
           } else {
             console.error('[WebSocket][S2S] Audio player not initialized');
           }
           break;
             
         case 'contentEnd':
-          console.log("Content end received:", data.event.contentEnd.type);
+          // console.log("Content end received:", data.event.contentEnd.type);
           const endContentId = data.event.contentEnd.contentId;
     
           if (data.event.contentEnd.stopReason === "INTERRUPTED") {
@@ -522,9 +531,21 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
         case 'error':
           console.error('[WebSocket] Server error:', data);
           break;
+
+        case 'completionStart':
+          console.log('[WebSocket][S2S] Completion started:', data.event.completionStart);
+          break;
           
+        case 'usageEvent':
+          // Ignore usage events
+          break;
+
         default:
           console.log('[WebSocket] Unknown message type:', data);
+        }
+      } else {
+        // Handle messages without event property or with invalid event structure
+        console.log('[WebSocket] Message with invalid event structure:', data);
       }
     } catch (error) {
       console.error('[WebSocket] Error handling message:', error);
@@ -730,7 +751,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
       const sessionStartEvent = {
         event: {
           sessionStart: {
-            inferenceConfiguration: DefaultInferenceConfiguration
+            promptName: newPromptName
           }
         }
       };
@@ -739,70 +760,9 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
       sendS2SEvent(sessionStartEvent);
       sessionStartedRef.current = true;
       
-      // Start a new prompt
-      const promptStartEvent = {
-        event: {
-          promptStart: {
-            promptName: newPromptName,
-            textOutputConfiguration: DefaultTextConfiguration,
-            audioOutputConfiguration: DefaultAudioOutputConfiguration
-          }
-        }
-      };
-      
-      // Send prompt start event
-      sendS2SEvent(promptStartEvent);
-      
       // Set the prompt name in state
       setPromptName(newPromptName);
       
-      // Send system prompt if provided
-      if (systemPrompt) {
-        // Use the pre-generated text content UUID for system content
-        const systemContentName = getTextContentUUID();
-        
-        // Start system content
-        const contentStartEvent = {
-          event: {
-            contentStart: {
-              promptName: newPromptName,
-              contentName: systemContentName,
-              type: "TEXT",
-              interactive: true,
-              role: "SYSTEM",
-              textInputConfiguration: {
-                mediaType: "text/plain"
-              }
-            }
-          }
-        };
-        sendS2SEvent(contentStartEvent);
-        
-        // Send system prompt content
-        const textInputEvent = {
-          event: {
-            textInput: {
-              promptName: newPromptName,
-              contentName: systemContentName,
-              content: systemPrompt
-            }
-          }
-        };
-        sendS2SEvent(textInputEvent);
-        
-        // End system content
-        const contentEndEvent = {
-          event: {
-            contentEnd: {
-              promptName: newPromptName,
-              contentName: systemContentName
-            }
-          }
-        };
-        sendS2SEvent(contentEndEvent);
-      }
-      
-      console.log('[S2S] Session started with promptName:', newPromptName);
       return newPromptName;
     } catch (error: unknown) {
       console.error('[S2S] Error starting session:', error);
@@ -907,6 +867,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
         audioPlayerRef.current = player;
         console.log('[Audio] AudioPlayer initialized successfully');
       }
+      
 
       // Store options for later use
       streamOptionsRef.current = options || {};
@@ -920,7 +881,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
 
       console.log('[Audio] Starting new S2S session for audio streaming...');
       
-      const newPromptName = await startS2SSession(getFormattedSystemPrompt());
+      const newPromptName = await startS2SSession();
 
       const currentContentName = getAudioContentUUID();
       // Update streamOptions with the latest values
@@ -1016,7 +977,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
             if (!speakingStarted) {
               speakingStarted = true;
               // Notify that user started speaking
-              console.log('[Audio] User started speaking');
+              // console.log('[Audio] User started speaking');
             }
           }
 
@@ -1059,8 +1020,24 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
 
           // Convert directly to base64 using the more reliable method
           if (pcmData.length > 0) {
-            const base64Audio = convertToBase64(pcmData);
-            sendAudioChunk(base64Audio);
+            // Always send audio data to keep the connection active, but if muted send silence
+            if (!isMutedRef.current) {
+              const base64Audio = convertToBase64(pcmData);
+              sendAudioChunk(base64Audio);
+            } else {
+              // Send silence if muted
+              const silentPcmData = new Int16Array(pcmData.length);
+              // Fill with zeros (silence) but add minimal noise to prevent backend optimization
+              if (Math.random() < 0.1) {
+                silentPcmData[0] = 1; // Minimal non-zero value
+              }
+              const base64Audio = convertToBase64(silentPcmData);
+              sendAudioChunk(base64Audio);
+              // Only log occasionally to reduce noise
+              if (Math.random() < 0.01) {
+                console.log('[Audio] Microphone is muted, sending silent audio data');
+              }
+            }
           }
         } catch (error) {
           console.error("Error processing audio data:", error);
@@ -1071,7 +1048,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
       setIsStreaming(true);
       isStreamingRef.current = true;
       
-      console.log("Audio streaming started successfully");
+      // console.log("Audio streaming started successfully");
 
     } catch (error) {
       console.error('Error starting streaming:', error);
@@ -1247,7 +1224,28 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
       formattedMessage = `<div data-message-role="${role}" data-content-id="${contentId}" data-timestamp="${timestamp}">${formattedContent}</div>`;
     }
     
-    setTextStream(prevStream => [...prevStream, formattedMessage]);
+    setTextStream(prevStream => {
+      // Check if we should append to the last message or create a new one
+      if (prevStream.length > 0) {
+        const lastMessage = prevStream[prevStream.length - 1];
+        
+        // Extract role from the last message
+        const roleMatch = lastMessage.match(/data-message-role="([^"]+)"/);
+        const lastRole = roleMatch ? roleMatch[1] : null;
+        
+        // Check if the last message contains an image (indicating it's an image upload)
+        const containsImage = lastMessage.includes('<img') || lastMessage.includes('![') || lastMessage.includes('Image uploaded successfully');
+        
+        // If same role and last message contains an image, always create a new message
+        if (lastRole === role && containsImage) {
+          console.log(`[Messages] Creating new ${role} message after image upload`);
+          return [...prevStream, formattedMessage];
+        }
+      }
+      
+      // Default behavior: add as new message
+      return [...prevStream, formattedMessage];
+    });
   }, []);
 
   // Add a system message (notifications, errors, etc.)
@@ -1262,19 +1260,12 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   // Clear all messages
   const clearMessages = useCallback(() => {
     setTextStream([]);
-    localStorage.removeItem('chatMessages');
-  }, []);
-
-  // Format system prompt with user information
-  const getFormattedSystemPrompt = useCallback(() => {
-    if (!userId) {
-      return DefaultSystemPrompt; // Return default if no userId
+    const storageKey = getChatStorageKey();
+    if (storageKey) {
+      localStorage.removeItem(storageKey);
     }
-    // Replace {current_user} placeholder with actual userId
-    const formattedSystemPrompt = DefaultSystemPrompt.replace('{userId}', userId).replace('{date}', new Date().toLocaleDateString()).replace('{sessionId}', sessionId);
-    console.log("Formatted system prompt:", formattedSystemPrompt);
-    return formattedSystemPrompt;
-  }, [userId, sessionId]);
+  }, [getChatStorageKey]);
+
 
   // Modify the sendMessage function to use the formatted system prompt
   const sendMessage = useCallback(async (message: string) => {
@@ -1339,10 +1330,37 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   // Effects
   // -----------------
 
-  // Save messages to localStorage when they change
+  // Load chat history when userId and sessionId become available
   useEffect(() => {
-    localStorage.setItem('chatMessages', JSON.stringify(textStream));
-  }, [textStream]);
+    const storageKey = getChatStorageKey();
+    if (storageKey && textStream.length === 0) {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        try {
+          const parsedMessages = JSON.parse(saved);
+          if (Array.isArray(parsedMessages) && parsedMessages.length > 0) {
+            setTextStream(parsedMessages);
+          }
+        } catch (error) {
+          console.warn('Error parsing saved chat messages:', error);
+        }
+      }
+
+      // Clean up old unscoped localStorage entries (migration helper)
+      cleanupOldUnscopedKeys();
+      
+      // Clean up old sessions to prevent localStorage from growing too large
+      cleanupOldestSessions(userId, 10); // Keep only 10 most recent sessions per user
+    }
+  }, [userId, sessionId, getChatStorageKey, textStream.length]);
+
+  // Save messages to localStorage when they change (with scoped key)
+  useEffect(() => {
+    const storageKey = getChatStorageKey();
+    if (storageKey && textStream.length > 0) {
+      localStorage.setItem(storageKey, JSON.stringify(textStream));
+    }
+  }, [textStream, getChatStorageKey]);
 
   // Handle WebSocket connection status changes
   useEffect(() => {
@@ -1382,7 +1400,10 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
       await cleanupAudioResources();
 
       // Clear chat history from localStorage
-      localStorage.removeItem('chatMessages');
+      const storageKey = getChatStorageKey();
+      if (storageKey) {
+        localStorage.removeItem(storageKey);
+      }
       
       // Clear messages from state
       setTextStream([]);
@@ -1409,6 +1430,23 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
     }
   }, [cleanupAudioResources, userId, sessionId]);
 
+ // Toggle mute state with simplified synchronization
+  const toggleMute = useCallback(() => {
+    // Get the current state from the ref (which is always up-to-date)
+    const currentMuteState = isMutedRef.current;
+    const newMuteState = !currentMuteState;
+    
+    // Minimal logging to reduce console noise
+    console.log(`[ChatContext] Mute state: ${currentMuteState} → ${newMuteState}`);
+    
+    // Update the ref immediately for synchronous access
+    isMutedRef.current = newMuteState;
+    
+    // Update React state last (this is async but we don't rely on it for immediate state access)
+    setIsMuted(newMuteState);
+  }, []);
+ 
+
   // Define the context value
   const contextValue = useMemo(() => ({
     // WebSocket Related
@@ -1433,6 +1471,8 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
     stopStreaming,
     onAudioData,
     resetContent,
+    isMuted,
+    toggleMute,
     
     // S2S Protocol Related
     startS2SSession,
@@ -1445,7 +1485,7 @@ export const ChatProvider: FC<{ children: ReactNode }> = ({ children }): JSX.Ele
   }), [
     isConnected, connectionId, connectionError, connect, disconnect, promptName,
     textStream, addMessage, addSystemMessage, clearMessages, isLoading, isStreaming, setIsLoading, sendMessage, handleFeedback, 
-    startStreaming, stopStreaming, onAudioData, resetContent,
+    startStreaming, stopStreaming, onAudioData, resetContent, isMuted, toggleMute,
     startS2SSession, endS2SSession, getPromptUUID, getTextContentUUID, getAudioContentUUID
   ]);
 
@@ -1484,9 +1524,10 @@ export const useMessages = () => {
 
 export const useAudio = () => {
   const { 
-    isStreaming, startStreaming, stopStreaming, onAudioData, resetContent
+    isStreaming, startStreaming, stopStreaming, onAudioData, resetContent,
+    isMuted, toggleMute
   } = useChat();
-  return { isStreaming, startStreaming, stopStreaming, onAudioData, resetContent };
+  return { isStreaming, startStreaming, stopStreaming, onAudioData, resetContent, isMuted, toggleMute };
 };
 
 export const useS2S = () => {
@@ -1495,4 +1536,4 @@ export const useS2S = () => {
     getPromptUUID, getTextContentUUID, getAudioContentUUID 
   } = useChat();
   return { startS2SSession, endS2SSession, getPromptUUID, getTextContentUUID, getAudioContentUUID };
-}; 
+};

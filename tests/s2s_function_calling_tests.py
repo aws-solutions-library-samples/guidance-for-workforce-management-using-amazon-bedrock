@@ -15,6 +15,7 @@ from dotenv import load_dotenv, find_dotenv
 import logging
 import uuid
 import argparse
+from pathlib import Path
 
 # Import the test harness core functionality
 from s2s_test_harness import run_test_loop
@@ -25,12 +26,13 @@ logging.basicConfig(level=logging.INFO,
                     datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
-def read_json_to_dataframe(directory_path: str = "./responses/model_sonic") -> pd.DataFrame:
+def read_json_to_dataframe(directory_path: str, model: str = "nova_sonic") -> pd.DataFrame:
     """
     Read all JSON files in the specified directory into a pandas DataFrame.
     
     Args:
         directory_path: Path to the directory containing JSON files
+        model: Model name used for file naming (default: nova_sonic)
         
     Returns:
         pandas DataFrame with the following columns:
@@ -43,6 +45,7 @@ def read_json_to_dataframe(directory_path: str = "./responses/model_sonic") -> p
         - speech_tokens_output: number of speech tokens in the output
         - text_tokens_output: number of text tokens in the output
         - total_tokens: total number of tokens used
+        - session_id: unique session identifier from the JSON file
     """
     # List to store data from each JSON file
     data_list = []
@@ -84,6 +87,9 @@ def read_json_to_dataframe(directory_path: str = "./responses/model_sonic") -> p
             speech_tokens_output = output_tokens.get('speechTokens', 0)
             text_tokens_output = output_tokens.get('textTokens', 0)
             
+            # Extract session ID
+            session_id = json_data.get('session_id', str(uuid.uuid4()))
+            
             # Identify corresponding audio output file more robustly
             # First check if there's a direct reference in the JSON
             output_file_path = None
@@ -113,7 +119,8 @@ def read_json_to_dataframe(directory_path: str = "./responses/model_sonic") -> p
                 'text_tokens_input': text_tokens_input,
                 'speech_tokens_output': speech_tokens_output, 
                 'text_tokens_output': text_tokens_output,
-                'total_tokens': total_tokens
+                'total_tokens': total_tokens,
+                'session_id': session_id
             }
             
             data_list.append(data_dict)
@@ -126,26 +133,86 @@ def read_json_to_dataframe(directory_path: str = "./responses/model_sonic") -> p
     
     return df
 
-async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_between_runs=5.0):
+def find_frontend_env():
+    """
+    Find the frontend .env file by looking in several possible locations.
+    
+    Returns:
+        Path: Path to the frontend .env file
+    """
+    # Try different possible locations for the .env file
+    possible_paths = [
+        # Frontend directory
+        Path('source/frontend/.env'),
+        # From the current working directory
+        Path(os.getcwd()) / 'source' / 'frontend' / '.env',
+        # From the parent of the current working directory
+        Path(os.getcwd()).parent / 'source' / 'frontend' / '.env',
+    ]
+    
+    # Try each path
+    for path in possible_paths:
+        if path.exists():
+            logger.info(f"Found frontend .env file at: {path.absolute()}")
+            return path
+    
+    # If no .env file is found, log a warning and return None
+    logger.warning("No frontend .env file found in any of the expected locations")
+    return None
+
+async def run_tests(model="nova_sonic", num_runs=1, delay_between_tests=5.0, delay_between_runs=5.0):
     """
     Run the speech-to-speech test suite multiple times.
     
     Args:
-        server_url (str): WebSocket server URL (default: from environment variables)
+        model (str): Model name to use as prefix for output files (default: nova_sonic)
         num_runs (int): Number of times to run the test suite (default: 1)
         delay_between_tests (float): Delay in seconds between test iterations (default: 5.0)
         delay_between_runs (float): Delay in seconds between test runs (default: 5.0)
     """
-    # Loading environment variables
-    local_env_filename = '../deployment/.env'
-    load_dotenv(find_dotenv(local_env_filename), override=True)
+    # Loading environment variables - enhanced path detection
+    env_path = find_dotenv()
+    if env_path:
+        load_dotenv(dotenv_path=env_path, override=True)
+        logger.info(f"Loaded environment from: {env_path}")
+    else:
+        logger.warning("No .env file found, using system environment variables")
     
-    # Use provided server URL or default to localhost WebSocket endpoint
-    ws_url = server_url or 'http://localhost:8000/ws'
+    # Load frontend .env file to get VITE_WEBSOCKET_URL
+    frontend_env_path = find_frontend_env()
+    ws_url = None
+    
+    if frontend_env_path:
+        # Load the frontend .env file
+        with open(frontend_env_path, 'r') as f:
+            for line in f:
+                if line.startswith('VITE_WEBSOCKET_URL='):
+                    ws_url = line.strip().split('=', 1)[1]
+                    # Remove quotes if present
+                    if ws_url.startswith('"') and ws_url.endswith('"'):
+                        ws_url = ws_url[1:-1]
+                    elif ws_url.startswith("'") and ws_url.endswith("'"):
+                        ws_url = ws_url[1:-1]
+                    break
+        
+        if ws_url:
+            logger.info(f"Using WebSocket URL from frontend .env: {ws_url}")
+        else:
+            logger.warning("VITE_WEBSOCKET_URL not found in frontend .env file")
+    
+    # If ws_url is still None, fall back to environment variables
+    if not ws_url:
+        domain_name = os.getenv('DOMAIN_NAME')
+        if domain_name:
+            ws_url = f"https://backend.{domain_name}/ws"
+        else:
+            ws_url = 'http://localhost:8000/ws'
+        logger.info(f"Using fallback WebSocket URL: {ws_url}")
+    
     logger.info(f"Using WebSocket server URL: {ws_url}")
     
     # Create base output directory
-    base_output_dir = "./responses/model_sonic"
+    base_output_dir = f"./responses/model_{model}"
     os.makedirs(base_output_dir, exist_ok=True)
     
     # Find audio files in the audio_samples directory
@@ -166,10 +233,20 @@ async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_
         run_output_dir = os.path.join(base_output_dir, f"run_{run}")
         os.makedirs(run_output_dir, exist_ok=True)
         
-        # Run test loop using the s2s_test_harness
+        # Run test loop using the s2s_test_harness with enhanced error handling
         try:
+            # Get fresh credentials for each run
+            user_email = os.getenv('EMAIL')
+            user_password = os.getenv('COGNITO_PASSWORD')
+            
+            if not user_email or not user_password:
+                logger.error("Missing EMAIL or COGNITO_PASSWORD environment variables")
+                continue
+                
             results = await run_test_loop(
                 audio_files=[f"./audio_samples/{f}" for f in audio_files],
+                user_id=user_email,
+                password=user_password,
                 server_url=ws_url,
                 delay_between_tests=delay_between_tests,
                 output_dir=run_output_dir
@@ -179,10 +256,10 @@ async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_
             logger.info(f"Test run {run} completed with {len(results)} results")
             
             # Process the results dataframe for this run
-            df = read_json_to_dataframe(run_output_dir)
+            df = read_json_to_dataframe(run_output_dir, model)
             
             # Save the dataframe to JSONL in the run directory
-            jsonl_path = os.path.join(run_output_dir, "s2s_sonic_function_calling_responses.jsonl")
+            jsonl_path = os.path.join(run_output_dir, f"{model}_function_calling_responses.jsonl")
             with open(jsonl_path, 'w') as f:
                 for _, row in df.iterrows():
                     f.write(json.dumps(row.to_dict()) + '\n')
@@ -198,11 +275,11 @@ async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_
     
     # Create a merged JSONL with all results
     try:
-        merged_jsonl_path = os.path.join(base_output_dir, "s2s_sonic_function_calling_responses.jsonl")
+        merged_jsonl_path = os.path.join(base_output_dir, f"{model}_function_calling_responses.jsonl")
         with open(merged_jsonl_path, 'w') as merged_file:
             for run in range(1, num_runs + 1):
                 run_dir = os.path.join(base_output_dir, f"run_{run}")
-                jsonl_path = os.path.join(run_dir, "s2s_sonic_function_calling_responses.jsonl")
+                jsonl_path = os.path.join(run_dir, f"{model}_function_calling_responses.jsonl")
                 
                 if os.path.exists(jsonl_path):
                     with open(jsonl_path, 'r') as run_file:
@@ -223,6 +300,10 @@ async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_
                                 record['text_tokens_output'] = 0
                             if 'total_tokens' not in record:
                                 record['total_tokens'] = 0
+                            
+                            # Ensure session_id is present
+                            if 'session_id' not in record:
+                                record['session_id'] = f"session_{uuid.uuid4()}"
                                 
                             # Write to merged file
                             merged_file.write(json.dumps(record) + '\n')
@@ -236,7 +317,10 @@ async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_
                 all_records.append(json.loads(line.strip()))
             
             # Print summary statistics
-            successful_responses = sum(1 for record in all_records if record.get('text_responses'))
+            successful_responses = sum(1 for record in all_records if 
+                          record.get('text_responses') and 
+                          (record.get('output_file_path') is not None or 
+                           record.get('speech_tokens_output', 0) > 0))
             total_tests = len(all_records)
             success_rate = successful_responses / total_tests if total_tests > 0 else 0
             
@@ -266,8 +350,8 @@ async def run_tests(server_url=None, num_runs=1, delay_between_tests=5.0, delay_
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run speech-to-speech function calling tests")
-    parser.add_argument("--server-url", type=str, default=None, 
-                        help="WebSocket server URL (default: http://localhost:8000/ws)")
+    parser.add_argument("--model", type=str, default="nova_sonic", 
+                        help="Model name to use as prefix for output files (default: nova_sonic)")
     parser.add_argument("--num-runs", type=int, default=1, 
                         help="Number of test runs to execute (default: 1)")
     parser.add_argument("--delay", type=float, default=5.0, 
@@ -278,7 +362,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     asyncio.run(run_tests(
-        server_url=args.server_url,
+        model=args.model,
         num_runs=args.num_runs,
         delay_between_tests=args.delay,
         delay_between_runs=args.run_delay

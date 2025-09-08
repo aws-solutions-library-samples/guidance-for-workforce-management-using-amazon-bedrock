@@ -756,7 +756,7 @@ metadata:
       routing.http2.enabled=false,
       idle_timeout.timeout_seconds=600,
       access_logs.s3.enabled=true,
-      access_logs.s3.bucket="${ACCESS_LOGS_BUCKET_NAME}"
+      access_logs.s3.bucket=${ACCESS_LOGS_BUCKET_NAME}
     alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-port: "8000"

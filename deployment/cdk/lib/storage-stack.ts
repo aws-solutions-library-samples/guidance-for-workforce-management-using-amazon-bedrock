@@ -37,7 +37,7 @@ export class StorageStack extends cdk.Stack {
     }
 
     // Create a dedicated S3 access logs bucket
-    const accessLogsBucket = new s3.Bucket(this, `${resourcePrefix}-AccessLogsBucket`, {
+    const accessLogsBucket = new s3.Bucket(this, `${resourcePrefix}-AccessLogs`, {
       publicReadAccess: false,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,

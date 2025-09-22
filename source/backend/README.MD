@@ -45,7 +45,6 @@ The following environment variables can be configured:
 | S3_BUCKET_NAME | S3 bucket name for image storage | (required) |
 | PORT | Server port | 8000 |
 | HOST | Server host | 0.0.0.0 |
-| DOMAIN_NAME | Domain name for CORS configuration | * |
 
 ### System Prompts
 | Variable | Description | Default |
@@ -72,31 +71,7 @@ The following environment variables can be configured:
    python -m pip install -r requirements.txt
    ```
 
-3. Set environment variables (create a `.env` file):
-   ```bash
-   # Authentication
-   COGNITO_USER_POOL_ID=us-east-1_XXXXXXXXX
-   COGNITO_IDENTITY_POOL_ID=us-east-1:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-   COGNITO_APP_CLIENT_ID=1234567890abcdefghijklmnop
-   AWS_REGION=us-east-1
-   
-   # Bedrock Configuration
-   BEDROCK_MODEL_ID="us.anthropic.claude-3-5-haiku-20241022-v1:0"
-   BD_GUARDRAIL_IDENTIFIER="XXX"
-   BD_GUARDRAIL_VERSION="DRAFT"
-   BD_KB_ID="XXX"
-   
-   # Application
-   STACK_NAME="retail"
-   STACK_ENVIRONMENT="dev"
-   S3_BUCKET_NAME="XXX"
-   DOMAIN_NAME="localhost"
-   
-   # AWS Credentials (if not using IAM roles)
-   AWS_ACCESS_KEY_ID="XXX"
-   AWS_SECRET_ACCESS_KEY="XXX"
-   AWS_SESSION_TOKEN="XXX"
-   ```
+3. Review the environment variables in the `.env` that has been created by the deploy.sh script:
 
 4. Run the unified server:
    ```bash

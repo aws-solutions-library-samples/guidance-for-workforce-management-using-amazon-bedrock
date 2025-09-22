@@ -13,9 +13,6 @@ import { Construct } from "constructs";
 export interface StorageStackProps extends cdk.StackProps {
   resourcePrefix: string;
   environment: string;
-  domainName: string;
-  certificateArn: string;
-  parentDomainName: string;
 }
 
 export class StorageStack extends cdk.Stack {
@@ -28,13 +25,6 @@ export class StorageStack extends cdk.Stack {
     super(scope, id, props);
 
     const resourcePrefix = props.resourcePrefix;
-    const domainName = props.domainName;
-    const certificateArn = props.certificateArn;
-    const parentDomainName = props.parentDomainName;
-
-    if (!domainName || !certificateArn || !parentDomainName) {
-      throw new Error('domainName, certificateArn, and parentDomainName must be provided when creating the StorageStack');
-    }
 
     // Create a dedicated S3 access logs bucket
     const accessLogsBucket = new s3.Bucket(this, `${resourcePrefix}-AccessLogs`, {
@@ -112,8 +102,8 @@ export class StorageStack extends cdk.Stack {
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS, // Force HTTPS
       },
       defaultRootObject: 'index.html',
-      domainNames: [`${domainName}`],
-      certificate: acm.Certificate.fromCertificateArn(this, `${resourcePrefix}-ImportedCertificate`, certificateArn),
+      // domainNames: [`${domainName}`],
+      // certificate: acm.Certificate.fromCertificateArn(this, `${resourcePrefix}-ImportedCertificate`, certificateArn),
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021, // Set minimum TLS version
     });
 
@@ -141,43 +131,43 @@ export class StorageStack extends cdk.Stack {
       value: this.cloudFrontDistribution.distributionDomainName,
     });
 
-    // Import the existing hosted zone
-    const hostedZone = route53.HostedZone.fromLookup(this, `${resourcePrefix}-ExistingHostedZone`, {
-      domainName: parentDomainName,
-    });
+    // // Import the existing hosted zone
+    // const hostedZone = route53.HostedZone.fromLookup(this, `${resourcePrefix}-ExistingHostedZone`, {
+    //   domainName: parentDomainName,
+    // });
 
-    // Create a custom resource to check if the record exists
-    const checkRecordExists = new cr.AwsCustomResource(this, `${resourcePrefix}-CheckRecordExists`, {
-      onCreate: {
-        service: 'Route53',
-        action: 'listResourceRecordSets',
-        parameters: {
-          HostedZoneId: hostedZone.hostedZoneId,
-          StartRecordName: domainName,
-          StartRecordType: 'A',
-          MaxItems: '1'
-        },
-        physicalResourceId: cr.PhysicalResourceId.of('RecordCheck')
-      },
-      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-        resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE
-      })
-    });
+    // // Create a custom resource to check if the record exists
+    // const checkRecordExists = new cr.AwsCustomResource(this, `${resourcePrefix}-CheckRecordExists`, {
+    //   onCreate: {
+    //     service: 'Route53',
+    //     action: 'listResourceRecordSets',
+    //     parameters: {
+    //       HostedZoneId: hostedZone.hostedZoneId,
+    //       StartRecordName: domainName,
+    //       StartRecordType: 'A',
+    //       MaxItems: '1'
+    //     },
+    //     physicalResourceId: cr.PhysicalResourceId.of('RecordCheck')
+    //   },
+    //   policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+    //     resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE
+    //   })
+    // });
 
-    // Create A record only if it doesn't exist
-    const aliasRecord = new route53.ARecord(this, `${resourcePrefix}-AliasRecord`, {
-      zone: hostedZone,
-      target: route53.RecordTarget.fromAlias(
-        new route53targets.CloudFrontTarget(this.cloudFrontDistribution)
-      ),
-      ttl: cdk.Duration.minutes(5),
-      recordName: domainName,
-      // Only create if the record doesn't exist
-      deleteExisting: false,
-    });
+    // // Create A record only if it doesn't exist
+    // const aliasRecord = new route53.ARecord(this, `${resourcePrefix}-AliasRecord`, {
+    //   zone: hostedZone,
+    //   target: route53.RecordTarget.fromAlias(
+    //     new route53targets.CloudFrontTarget(this.cloudFrontDistribution)
+    //   ),
+    //   ttl: cdk.Duration.minutes(5),
+    //   recordName: domainName,
+    //   // Only create if the record doesn't exist
+    //   deleteExisting: false,
+    // });
 
-    // Add dependency to ensure the check happens first
-    aliasRecord.node.addDependency(checkRecordExists);
+    // // Add dependency to ensure the check happens first
+    // aliasRecord.node.addDependency(checkRecordExists);
 
     // Create a data bucket for storing assets
     this.dataBucket = new s3.Bucket(this, `${resourcePrefix}-DataBucket`, {

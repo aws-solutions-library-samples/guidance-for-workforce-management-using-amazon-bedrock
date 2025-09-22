@@ -24,31 +24,44 @@ get_stack_output() {
   fi
 }
 
-# Load environment variables
-if [ -f .env ]; then
-  echo "Loading environment variables from .env file"
-  set -a
-  source .env
-  set +a
-else
-  echo "No .env file found. Please create one with the required variables."
-  exit 1
+# Helper function to wait for stack deletion with timeout and progress indicator
+wait_for_stack_deletion() {
+  local stack_name=$1
+  local timeout=$2
+  local start_time=$(date +%s)
+  local end_time=$((start_time + timeout))
+  local current_time=$start_time
+  local counter=0
+  
+  echo "Waiting for stack $stack_name to be deleted (timeout: $timeout seconds)..."
+  
+  while [ $current_time -lt $end_time ]; do
+    if ! stack_exists "$stack_name"; then
+      echo -e "\nStack $stack_name has been deleted successfully."
+      return 0
+    fi
+    
+    # Print a progress indicator
+    counter=$((counter + 1))
+    if [ $((counter % 10)) -eq 0 ]; then
+      echo -n "."
+    fi
+    
+    sleep 10
+    current_time=$(date +%s)
+  done
+  
+  echo -e "\nTimeout reached while waiting for stack $stack_name to be deleted."
+  echo "The stack deletion is still in progress and may complete eventually."
+  echo "You can check the status in the CloudFormation console."
+  return 1
+}
+
+# Set AWS region if not already set
+if [ -z "$AWS_REGION" ]; then
+  AWS_REGION="us-east-1"
 fi
 
-# Check for required environment variables
-required_vars=(
-  "AWS_REGION"
-  "STACK_NAME"
-  "DOMAIN_NAME"
-  "PARENT_DOMAIN_NAME"
-)
-
-for var in "${required_vars[@]}"; do
-  if [ -z "${!var}" ]; then
-    echo "Error: Required environment variable $var is not set."
-    exit 1
-  fi
-done
 
 # Check if AWS CLI is installed
 if ! command -v aws &> /dev/null; then
@@ -65,77 +78,6 @@ fi
 # Get AWS account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
-
-# Delete Route53 records
-echo "Deleting Route53 records..."
-HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name --dns-name ${PARENT_DOMAIN_NAME} --query 'HostedZones[0].Id' --output text 2>/dev/null | cut -d'/' -f3 || true)
-
-if [ -n "$HOSTED_ZONE_ID" ]; then
-  echo "Found hosted zone: $HOSTED_ZONE_ID"
-  
-  # Get the ALB hosted zone ID and DNS name
-  CLUSTER_NAME=$(get_stack_output ${STACK_NAME}EksStack ${STACK_NAME}ClusterName)
-  if [ -n "$CLUSTER_NAME" ]; then
-    echo "Found EKS cluster: $CLUSTER_NAME"
-    aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION || {
-      echo "Warning: Could not update kubeconfig for cluster $CLUSTER_NAME. It may have been deleted."
-      echo "Continuing with other cleanup tasks..."
-    }
-    
-    if kubectl cluster-info &>/dev/null; then
-      BACKEND_ALB=$(kubectl get ingress ${STACK_NAME}-ingress -n ${STACK_NAME}-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-      if [ -n "$BACKEND_ALB" ]; then
-        echo "Found ALB: $BACKEND_ALB"
-        ALB_HOSTED_ZONE_ID=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?DNSName=='$BACKEND_ALB'].CanonicalHostedZoneId" --output text 2>/dev/null || true)
-        
-        if [ -n "$ALB_HOSTED_ZONE_ID" ]; then
-          echo "Deleting API record for ALB..."
-          aws route53 change-resource-record-sets \
-            --hosted-zone-id $HOSTED_ZONE_ID \
-            --change-batch '{
-              "Changes": [{
-                "Action": "DELETE",
-                "ResourceRecordSet": {
-                  "Name": "backend.'${DOMAIN_NAME}'",
-                  "Type": "A",
-                  "AliasTarget": {
-                    "HostedZoneId": "'${ALB_HOSTED_ZONE_ID}'",
-                    "DNSName": "'${BACKEND_ALB}'",
-                    "EvaluateTargetHealth": true
-                  }
-                }
-              }]
-            }' || echo "Warning: Failed to delete API record. Continuing..."
-        fi
-      fi
-    fi
-  fi
-
-  # Get CloudFront distribution ID
-  CLOUDFRONT_DOMAIN=$(get_stack_output ${STACK_NAME}StorageStack ${STACK_NAME}CloudFrontDistributionDomainName)
-  if [ -n "$CLOUDFRONT_DOMAIN" ]; then
-    echo "Found CloudFront domain: $CLOUDFRONT_DOMAIN"
-    echo "Deleting CloudFront record..."
-    aws route53 change-resource-record-sets \
-      --hosted-zone-id $HOSTED_ZONE_ID \
-      --change-batch '{
-        "Changes": [{
-          "Action": "DELETE",
-          "ResourceRecordSet": {
-            "Name": "'${DOMAIN_NAME}'",
-            "Type": "A",
-            "AliasTarget": {
-              "HostedZoneId": "Z2FDTNDATAQYW2",
-              "DNSName": "'${CLOUDFRONT_DOMAIN}'",
-              "EvaluateTargetHealth": false
-            }
-          }
-        }]
-      }' || echo "Warning: Failed to delete CloudFront record. Continuing..."
-  fi
-else
-  echo "No hosted zone found. Skipping Route53 record deletion."
-fi
 
 # Delete Kubernetes resources
 echo "Deleting Kubernetes resources..."
@@ -154,7 +96,24 @@ if command -v kubectl &> /dev/null; then
     # Only try to delete Kubernetes resources if we can access the cluster
     if kubectl cluster-info &>/dev/null; then
       echo "Deleting Kubernetes resources in cluster $CLUSTER_NAME..."
+      
+      # Delete Pod Identity Association first
+      echo "Checking for Pod Identity Associations..."
+      POD_IDENTITY_ASSOCIATIONS=$(aws eks list-pod-identity-associations --cluster-name $CLUSTER_NAME 2>/dev/null || echo "")
+      if [ -n "$POD_IDENTITY_ASSOCIATIONS" ]; then
+        echo "Deleting Pod Identity Associations..."
+        aws eks list-pod-identity-associations --cluster-name $CLUSTER_NAME --query "associations[].associationArn" --output text | while read -r ARN; do
+          if [ -n "$ARN" ]; then
+            echo "Deleting Pod Identity Association: $ARN"
+            aws eks delete-pod-identity-association --cluster-name $CLUSTER_NAME --association-arn $ARN || echo "Warning: Failed to delete Pod Identity Association. Continuing..."
+          fi
+        done
+        echo "Waiting for Pod Identity Associations to be deleted..."
+        sleep 30
+      fi
+      
       # Delete ingress first to trigger ALB deletion
+      echo "Deleting ingress resources..."
       kubectl delete ingress ${STACK_NAME}-ingress -n ${STACK_NAME}-app --ignore-not-found
       
       # Wait for ALB to be deleted
@@ -162,18 +121,23 @@ if command -v kubectl &> /dev/null; then
       sleep 30
       
       # Delete service
+      echo "Deleting backend service..."
       kubectl delete service ${STACK_NAME}-backend-service -n ${STACK_NAME}-app --ignore-not-found
       
       # Delete deployment
+      echo "Deleting backend deployment..."
       kubectl delete deployment ${STACK_NAME}-backend -n ${STACK_NAME}-app --ignore-not-found
       
       # Delete configmap
+      echo "Deleting app config..."
       kubectl delete configmap ${STACK_NAME}-app-config -n ${STACK_NAME}-app --ignore-not-found
       
       # Delete service account
+      echo "Deleting service account..."
       kubectl delete serviceaccount ${STACK_NAME}-backend-sa -n ${STACK_NAME}-app --ignore-not-found
       
       # Delete namespace
+      echo "Deleting app namespace..."
       kubectl delete namespace ${STACK_NAME}-app --ignore-not-found
       
       # Wait for all resources to be fully deleted
@@ -304,7 +268,7 @@ fi
 
 # Delete CDK stacks in correct order
 echo "Deleting CDK stacks in dependency order..."
-cd cdk
+cd deployment/cdk
 
 # Delete stacks in reverse dependency order
 echo "Checking GuardrailsStack..."
@@ -331,24 +295,42 @@ else
   echo "OpenSearchStack does not exist. Skipping..."
 fi
 
+# Delete EKS stack
 echo "Checking EksStack..."
 if stack_exists ${STACK_NAME}EksStack; then
   echo "Deleting EksStack..."
-  npx cdk destroy ${STACK_NAME}EksStack --force || echo "Warning: Failed to delete EksStack. Continuing..."
+  echo "This may take a while as EKS clusters have many dependent resources."
+  echo "The script will provide progress updates every 10 seconds."
+  
+  # Start the deletion process
+  npx cdk destroy ${STACK_NAME}EksStack --force || echo "Warning: Failed to initiate EksStack deletion. Continuing..."
+  
+  # Wait for the stack to be deleted with a timeout of 30 minutes (1800 seconds)
+  wait_for_stack_deletion ${STACK_NAME}EksStack 1800
 else
   echo "EksStack does not exist. Skipping..."
 fi
 
 # Wait for EKS cluster to be fully deleted to ensure network interfaces are cleaned up
-echo "Waiting for EKS cluster to be fully deleted..."
+echo "Checking if EKS cluster still exists..."
 CLUSTER_NAME=$(get_stack_output ${STACK_NAME}EksStack ${STACK_NAME}ClusterName)
 if [ -n "$CLUSTER_NAME" ]; then
   echo "Waiting for EKS cluster $CLUSTER_NAME to be deleted..."
+  echo "This may take several minutes. Progress updates will be shown every 30 seconds."
+  
+  counter=0
   while aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION &>/dev/null; do
-    echo "EKS cluster still exists, waiting 30 seconds..."
+    counter=$((counter + 1))
+    echo -n "."
+    if [ $((counter % 6)) -eq 0 ]; then
+      echo -n " $((counter / 6)) minutes elapsed"
+    fi
+    if [ $((counter % 12)) -eq 0 ]; then
+      echo ""  # New line every minute
+    fi
     sleep 30
   done
-  echo "EKS cluster has been deleted."
+  echo -e "\nEKS cluster has been deleted."
 else
   echo "EKS cluster name not found, assuming it's already deleted."
 fi
@@ -404,6 +386,4 @@ else
   echo "InfraStack does not exist. Skipping..."
 fi
 
-cd ..
-
-echo "Cleanup completed successfully!" 
+echo "Cleanup completed successfully!"

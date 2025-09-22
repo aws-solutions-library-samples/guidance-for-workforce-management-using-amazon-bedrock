@@ -8,7 +8,7 @@
     "build": "./node_modules/typescript/bin/tsc",
     "watch": "./node_modules/typescript/bin/tsc -w",
     "cdk": "cdk",
-    "deploy": "cdk deploy --outputs-file ../../source/frontend/src/cdk-outputs.json"
+    "deploy": "cdk deploy --outputs-file cdk-outputs.json"
   },
   "dependencies": {
     "@aws-cdk/lambda-layer-kubectl-v33": "2.0.0",

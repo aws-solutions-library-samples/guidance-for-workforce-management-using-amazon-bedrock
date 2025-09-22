@@ -83,13 +83,6 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 ## Prerequisites
 
-### AWS account requirements
-
-Before deploying this solution, you must have the following set up in your AWS account:
-- A public SSL/TLS certificate from AWS Certificate Manager (ACM) [documentation on how to create public certificate](https://aws.amazon.com/certificate-manager/getting-started/)
-- A DNS domain or subdomain configured in Route 53 or your DNS provider [documentation on how to create a domain](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-configuring.html)
-
-
 ### AWS CDK bootstrap
 
 This Guidance uses the AWS CDK to deploy resources in an AWS Account.
@@ -176,50 +169,9 @@ Go to the deployment directoy.
 cd deployment
 ```
 
-Then, create a `.env` file in the deployment directory with the following variable placeholders:
+Then, create a `.env` file in the deployment directory based of the provided `.env.example` template.
 
-```
-
-# email for the initial store manager user in the system
-EMAIL=your-email@anycompany.com
-# parent domain (if used with sub-domain)
-PARENT_DOMAIN_NAME=anycompany.dev
-# domain of the wbesite
-DOMAIN_NAME=retail.anycompany.dev
-# wildcard certificate for sub-domain e.g. *.retail.anycompany.dev for the backend
-CERTIFICATE_ARN='XXX'
-# certificate for domain e.g. retail.anycompany.dev
-WEB_CERTIFICATE_ARN='XXX'
-
-
-# --- PLACEHOLDERS - DO NOT CHANGE BELOW ---
-# AWS Configuration
-AWS_REGION=us-east-1
-
-# Stack Configuration
-STACK_NAME=retail
-STACK_ENVIRONMENT=dev
-
-# Cognito details
-COGNITO_USER_POOL_ID=us-east-1_XXXXXXXXX
-COGNITO_APP_CLIENT_ID=1234567890abcdefghijklmnop
-
-# Bedrock Configuration
-BD_GUARDRAIL_IDENTIFIER=your-guardrail-id
-BD_GUARDRAIL_VERSION=your-guardrail-version
-BD_KB_ID=your-bedrock-kb-id
-BEDROCK_MODEL_ID=us.amazon.nova-pro-v1:0
-
-# storage for user uploads and website
-S3_BUCKET_NAME=s3-data-storage-user-image-uploads
-WEBSITE_BUCKET_NAME=website-storage
-
-```
-
-You can use the provided `.env.example` file as a template.
-
-
-Update the EMAIL, PARENT_DOMAIN_NAME, DOMAIN_NAME, CERTIFICATE_ARN, WEB_CERTIFICATE_ARN with respective values for your environment, keep the other variables as-is.
+Update the EMAIL and COGNITO_PASSWORD variable for your environment, keep the other variables as-is.
 
 ### 4. Run the Deployment Script
 
@@ -240,7 +192,6 @@ chmod +x deploy.sh
 
 After deployment, the script will output:
 - Frontend URL
-- CloudFront URL
 - User Email
 - Initial user password
 

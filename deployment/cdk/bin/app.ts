@@ -12,18 +12,15 @@ const app = new cdk.App();
 
 // Define environment
 const env = {
-  account: process.env.CDK_DEFAULT_ACCOUNT,
-  region: process.env.CDK_DEFAULT_REGION || 'us-east-1'
+  account: process.env.CDK_DEFAULT_ACCOUNT
 };
 
 // Define common properties
 const stackEnvironment = process.env.STACK_ENVIRONMENT;
 const resourcePrefix = process.env.STACK_NAME;
-const parentDomainName = process.env.PARENT_DOMAIN_NAME;
-const domainName = process.env.DOMAIN_NAME;
-const certificateArn = process.env.CERTIFICATE_ARN;
-const webCertificateArn = process.env.WEB_CERTIFICATE_ARN;
 const emailAddress = process.env.EMAIL;
+const initialPassword = process.env.COGNITO_PASSWORD;
+
 if (!resourcePrefix) {
   throw new Error('STACK_NAME environment variable must be set');
 }
@@ -32,22 +29,20 @@ if (!stackEnvironment) {
   throw new Error('STACK_ENVIRONMENT environment variable must be set');
 }
 
-if (!domainName || !certificateArn || !parentDomainName || !webCertificateArn) {
-  throw new Error('DOMAIN_NAME, CERTIFICATE_ARN, PARENT_DOMAIN_NAME, and WEB_CERTIFICATE_ARN environment variables must be set');
-}
-
 if (!emailAddress) {
   throw new Error('EMAIL environment variable must be set');
+}
+
+if (!initialPassword) {
+  throw new Error('COGNITO_PASSWORD environment variable must be set');
 }
 
 // Type assertions since we've checked they're defined
 const stackName = resourcePrefix as string;
 const envName = stackEnvironment as string;
-const domain = domainName as string;
-const certArn = certificateArn as string;
-const webCertArn = webCertificateArn as string;
-const parentDomain = parentDomainName as string;
+
 const email = emailAddress as string;
+const password = initialPassword as string;
 
 // Common tags for all stacks
 const commonTags = {
@@ -73,9 +68,6 @@ const storageStack = new StorageStack(app, `${stackName}StorageStack`, {
   env,
   resourcePrefix: stackName,
   environment: envName,
-  domainName: domain,
-  certificateArn: webCertArn,
-  parentDomainName: parentDomain,
   terminationProtection: false,
   description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - Storage resources including S3 buckets and DynamoDB tables'
 });
@@ -91,6 +83,7 @@ const authStack = new AuthStack(app, `${stackName}AuthStack`, {
   resourcePrefix: stackName,
   environment: envName,
   emailAddress: email,
+  initialPassword: password,
   terminationProtection: false, 
   description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - Authentication resources including Cognito user pools'
 });
@@ -107,8 +100,6 @@ const eksStack = new EksStack(app, `${stackName}EksStack`, {
   environment: envName,
   vpc: infraStack.vpc,
   authenticatedRole: authStack.authenticatedRole,
-  domainName: domain,
-  certificateArn: certArn,
   terminationProtection: false,
   dataBucket: storageStack.dataBucket,
   description: 'Guidance for Workforce Management using Amazon Bedrock (SO9595) - EKS cluster and backend resources'

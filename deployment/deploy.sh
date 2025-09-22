@@ -6,6 +6,49 @@ set -e
 # Disable AWS CLI pager to prevent pausing for user input
 export AWS_PAGER=""
 
+# AWS OpenTelemetry Configuration 
+export OTEL_PYTHON_DISTRO="aws_distro"
+export OTEL_PYTHON_CONFIGURATOR="aws_configurator"
+
+# Service Identification
+export OTEL_RESOURCE_ATTRIBUTES="service.name=\"retail-agent\""
+export AGENT_OBSERVABILITY_ENABLED="true"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://xray.us-east-1.amazonaws.com/v1/traces"
+
+# CloudWatch Integration
+export OTEL_EXPORTER_OTLP_LOGS_HEADERS="x-aws-log-group=bedrock-agentcore-observability,x-aws-log-stream=default,x-aws-metric-namespace=bedrock-agentcore"
+
+# Instrumentation Exclusions - Extended to include all patterns from otel_config.py
+export OTEL_PYTHON_FASTAPI_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+export OTEL_PYTHON_REQUESTS_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+export OTEL_PYTHON_URLLIB3_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+export OTEL_PYTHON_HTTPX_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+export OTEL_PYTHON_AIOHTTP_CLIENT_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+export OTEL_PYTHON_BOTO3SQS_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+export OTEL_PYTHON_BOTOCORE_EXCLUDED_URLS="/ws/.*|/health|/metrics|.*websocket.*|/api/.*|.*\.amazonaws\.com.*|.*bedrock-runtime\..*|.*dynamodb\..*|.*cognito-identity\..*|.*s3\..*"
+
+# Disable unwanted instrumentations (from custom_otel_setup.py)
+export OTEL_PYTHON_DISABLED_INSTRUMENTATIONS="boto3sqs,botocore,requests,urllib3,httpx,aiohttp-client,asyncio,threading,logging,system_metrics,psutil,sqlite3,redis,pymongo,sqlalchemy,django,flask,tornado,pyramid,falcon,starlette,fastapi,websockets"
+
+# Propagation and Sampling
+export OTEL_PROPAGATORS="tracecontext,baggage,xray"
+export OTEL_TRACES_SAMPLER="always_on"
+export OTEL_BSP_SCHEDULE_DELAY="1000"
+export OTEL_BSP_MAX_EXPORT_BATCH_SIZE="512"
+export OTEL_BSP_EXPORT_TIMEOUT="30000"
+
+# AWS X-Ray specific
+export AWS_XRAY_TRACING_NAME="retailagent"
+export AWS_XRAY_CONTEXT_MISSING="LOG_ERROR"
+
+# Debug Configuration (optional - enable when needed)
+export OTEL_LOG_LEVEL="DEBUG"
+export OTEL_PYTHON_LOG_LEVEL="DEBUG"
+export AWS_XRAY_DEBUG_MODE="true"
+export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
+export OTEL_PYTHON_LOGGING_LEVEL="DEBUG"
+
 # Load environment variables
 if [ -f .env ]; then
   echo "Loading environment variables from .env file"
@@ -17,38 +60,17 @@ else
   exit 1
 fi
 
-# Check for required environment variables
-required_vars=(
-  "AWS_REGION"
-  "STACK_NAME"
-  "STACK_ENVIRONMENT"
-  "COGNITO_USER_POOL_ID"
-  "COGNITO_APP_CLIENT_ID"
-  "COGNITO_IDENTITY_POOL_ID"
-  "BD_GUARDRAIL_IDENTIFIER"
-  "BD_GUARDRAIL_VERSION"
-  "BD_KB_ID"
-  "BEDROCK_MODEL_ID"
-  "DOMAIN_NAME"
-  "PARENT_DOMAIN_NAME"
-  "WEB_CERTIFICATE_ARN"
-  "CERTIFICATE_ARN"
-  "EMAIL"
-  "COGNITO_PASSWORD"
-)
-
-for var in "${required_vars[@]}"; do
-  if [ -z "${!var}" ]; then
-    echo "Error: Required environment variable $var is not set."
-    exit 1
-  fi
-done
-
 # Function to update or add environment variable in .env file
 update_env_var() {
   local var_name="$1"
   local var_value="$2"
   local env_file=".env"
+  
+  # Create .env file if it doesn't exist
+  if [ ! -f "$env_file" ]; then
+    touch "$env_file"
+    echo "Created new .env file"
+  fi
   
   if grep -q "^${var_name}=" "$env_file"; then
     # Variable exists, update it
@@ -67,6 +89,11 @@ update_env_var() {
     echo "Added ${var_name} to .env file"
   fi
 }
+
+# Set AWS region if not already set
+if [ -z "$AWS_REGION" ]; then
+  export AWS_REGION="us-east-1"
+fi
 
 # Check if AWS CLI is installed
 if ! command -v aws &> /dev/null; then
@@ -147,8 +174,73 @@ docker build --platform=linux/amd64 -t $BACKEND_REPO_URI:latest ../source/backen
 docker push $BACKEND_REPO_URI:latest
 
 
+# Temporarily disable exit on error for kubectl installation
+set +e
+
+# install kubectl if not present
+if ! command -v kubectl &> /dev/null; then
+  echo "kubectl not found, installing..."
+  
+  # Create a bin directory in the current directory if it doesn't exist
+  mkdir -p ./bin
+  
+  # Determine OS and architecture
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ARCH=$(uname -m)
+  
+  # Map architecture names to kubectl naming convention
+  case ${ARCH} in
+    x86_64)
+      KUBECTL_ARCH="amd64"
+      ;;
+    aarch64|arm64)
+      KUBECTL_ARCH="arm64"
+      ;;
+    *)
+      KUBECTL_ARCH=${ARCH}
+      ;;
+  esac
+  
+  echo "Installing kubectl v1.31.0 for ${OS}/${KUBECTL_ARCH}..."
+  if ! curl -L -o ./bin/kubectl "https://dl.k8s.io/release/v1.31.0/bin/${OS}/${KUBECTL_ARCH}/kubectl"; then
+    echo "Failed to download kubectl. Exiting."
+    exit 1
+  fi
+  
+  # Make kubectl executable
+  chmod +x ./bin/kubectl
+  
+  # Add to PATH
+  export PATH="$(pwd)/bin:$PATH"
+  
+  # Define kubectl function instead of alias (works better in non-interactive shells)
+  kubectl() {
+    $(pwd)/bin/kubectl "$@"
+  }
+  export -f kubectl
+  
+  # Check if kubectl is working
+  if kubectl version --client 2>/dev/null; then
+    echo "kubectl installed successfully"
+    KUBECTL_VERSION=$(kubectl version --client --short 2>/dev/null | cut -d " " -f 3)
+    echo "kubectl version: ${KUBECTL_VERSION}"
+  else
+    echo "kubectl installation verification failed. Continuing anyway..."
+  fi
+else
+  KUBECTL_VERSION=$(kubectl version --client --short 2>/dev/null | cut -d " " -f 3)
+  echo "kubectl is already installed with version: ${KUBECTL_VERSION}"
+fi
+
+# Re-enable exit on error
+set -e
+
+
+echo "Get EKS cluster details and configure kubectl..."
 # Get the EKS cluster name from the CDK output
 CLUSTER_NAME=$(aws cloudformation describe-stacks --stack-name ${STACK_NAME}EksStack --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}ClusterName'].OutputValue" --output text)
+
+echo "EKS Cluster Name: $CLUSTER_NAME"
 
 # Configure kubectl to use the EKS cluster
 echo "Configuring kubectl to use the EKS cluster... $CLUSTER_NAME"
@@ -430,7 +522,7 @@ if [ -n "$ALB_POLICY_ARN_ORIGINAL" ]; then
 fi
 
 # Add a debug checkpoint
-echo "ALB Controller policy section completed. Continuing with deployment..."
+echo "ALB Controller policy section completed."
 
 # Create the app namespace if it doesn't exist
 echo "Creating retail-app namespace if it doesn't exist..."
@@ -453,39 +545,10 @@ KB_ID=$(aws cloudformation describe-stacks --stack-name ${STACK_NAME}OpenSearchS
 
 if [ -z "$KB_ID" ] || [ "$KB_ID" = "None" ]; then
   echo "Warning: Could not retrieve KnowledgeBaseId from CloudFormation OpenSearchStack."
-  echo "This may be because the OpenSearchStack failed to deploy."
-  echo "Using the value from .env file: ${BD_KB_ID}"
-  if [ -z "$BD_KB_ID" ]; then
-    echo "Error: No KnowledgeBaseId available in .env file either."
-    echo "Knowledge Base features will not work until this is resolved."
-    echo "You may need to deploy the OpenSearchStack manually or provide a valid KB_ID in .env"
-  fi
 else
   echo "Found KnowledgeBaseId: $KB_ID"
-  # Only override the BD_KB_ID from .env with the one from CloudFormation if it is of value 'XXX'
-  if [ "$BD_KB_ID" = "XXX" ]; then
-    BD_KB_ID=$KB_ID
-
-    # Update the .env file with the new KB_ID
-    echo "Updating .env file with the new KnowledgeBaseId..."
-    if grep -q "^BD_KB_ID=" .env; then
-      # If BD_KB_ID exists in .env, update it
-      # Handle different sed syntax for macOS vs Linux
-      if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS version
-        sed -i '' "s/^BD_KB_ID=.*$/BD_KB_ID=$KB_ID/" .env
-      else
-        # Linux version
-        sed -i "s/^BD_KB_ID=.*$/BD_KB_ID=$KB_ID/" .env
-      fi
-    else
-      # If BD_KB_ID doesn't exist in .env, add it
-      echo "BD_KB_ID=$KB_ID" >> .env
-    fi
-    echo "Updated .env file with BD_KB_ID=$KB_ID"
-  fi
+  export KB_ID="$KB_ID"
 fi
- 
 
 # Get the GUARDRAIL_IDENTIFIER and GUARDRAIL_VERSION directly from the GuardrailsStack output
 echo "Retrieving GUARDRAIL_IDENTIFIER and GUARDRAIL_VERSION from CloudFormation..."
@@ -494,57 +557,35 @@ GUARDRAIL_IDENTIFIER_FULL=$(aws cloudformation describe-stacks --stack-name ${ST
 GUARDRAIL_IDENTIFIER=$(echo $GUARDRAIL_IDENTIFIER_FULL | sed 's/.*guardrail\///')
 GUARDRAIL_VERSION=$(aws cloudformation describe-stacks --stack-name ${STACK_NAME}GuardrailsStack --query "Stacks[0].Outputs[?OutputKey=='GuardrailVersion'].OutputValue" --output text)
 if [ -z "$GUARDRAIL_IDENTIFIER" ]; then
-  echo "Warning: Could not retrieve GUARDRAIL_IDENTIFIER from CloudFormation. Using the value from .env file: ${BD_GUARDRAIL_IDENTIFIER}"
+  echo "Warning: Could not retrieve GUARDRAIL_IDENTIFIER from CloudFormation stack."
+
 else
   echo "Found GUARDRAIL_IDENTIFIER: $GUARDRAIL_IDENTIFIER"
-  # Override the GUARDRAIL_IDENTIFIER from .env with the one from CloudFormation
-  BD_GUARDRAIL_IDENTIFIER=$GUARDRAIL_IDENTIFIER
-  
-  # Update the .env file with the new KB_ID
-  echo "Updating .env file with the new GUARDRAIL_IDENTIFIER..."
-  if grep -q "^BD_GUARDRAIL_IDENTIFIER=" .env; then
-    # If GUARDRAIL_IDENTIFIER exists in .env, update it
-    # Handle different sed syntax for macOS vs Linux
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-      # macOS version
-      sed -i '' "s/^BD_GUARDRAIL_IDENTIFIER=.*$/BD_GUARDRAIL_IDENTIFIER=$GUARDRAIL_IDENTIFIER/" .env
-    else
-      # Linux version
-      sed -i "s/^BD_GUARDRAIL_IDENTIFIER=.*$/BD_GUARDRAIL_IDENTIFIER=$GUARDRAIL_IDENTIFIER/" .env
-    fi
-  else
-    # If GUARDRAIL_IDENTIFIER doesn't exist in .env, add it
-    echo "BD_GUARDRAIL_IDENTIFIER=$GUARDRAIL_IDENTIFIER" >> .env
-  fi
-  echo "Updated .env file with BD_GUARDRAIL_IDENTIFIER=$GUARDRAIL_IDENTIFIER"
+  export GUARDRAIL_IDENTIFIER="$GUARDRAIL_IDENTIFIER"
+
 fi
 
 if [ -z "$GUARDRAIL_VERSION" ]; then
-  echo "Warning: Could not retrieve GUARDRAIL_VERSION from CloudFormation. Using the value from .env file: ${BD_GUARDRAIL_VERSION}"
+  echo "Warning: Could not retrieve GUARDRAIL_VERSION from CloudFormation."
 else
   echo "Found GUARDRAIL_VERSION: $GUARDRAIL_VERSION"
-  # Override the   from .env with the one from CloudFormation
-  BD_GUARDRAIL_VERSION=$GUARDRAIL_VERSION
-  
-  # Update the .env file with the new KB_ID
-  echo "Updating .env file with the new GUARDRAIL_VERSION..."
-  if grep -q "^BD_GUARDRAIL_VERSION=" .env; then
-    # If GUARGUARDRAIL_VERSION exists in .env, update it
-    # Handle different sed syntax for macOS vs Linux
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-      # macOS version
-      sed -i '' "s/^BD_GUARDRAIL_VERSION=.*$/BD_GUARDRAIL_VERSION=$GUARDRAIL_VERSION/" .env
-    else
-      # Linux version
-      sed -i "s/^BD_GUARDRAIL_VERSION=.*$/BD_GUARDRAIL_VERSION=$GUARDRAIL_VERSION/" .env
-    fi
-  else
-    # If GUARDRAIL_VERSION doesn't exist in .env, add it
-    echo "BD_GUARDRAIL_VERSION=$GUARDRAIL_VERSION" >> .env
-  fi
-  echo "Updated .env file with BD_GUARDRAIL_VERSION=$GUARDRAIL_VERSION"
+  export GUARDRAIL_VERSION="$GUARDRAIL_VERSION"
 fi
+# Get the S3 bucket name from the StorageStack using the exact output key
+STORAGE_STACK_NAME="${STACK_NAME}StorageStack"
+S3_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}DataBucketName'].OutputValue" --output text)
+echo "S3 data bucket name: $S3_BUCKET_NAME"
 
+# Get the CloudFront distribution domain name using the exact output key
+echo "Retrieving CloudFront distribution domain from CloudFormation..."
+CLOUDFRONT_DOMAIN=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}CloudFrontDistributionDomainName'].OutputValue" --output text)
+if [ -z "$CLOUDFRONT_DOMAIN" ]; then
+  echo "Error: Could not retrieve CloudFront distribution domain from CloudFormation."
+  echo "Checking all available outputs from the storage stack..."
+  aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs" --output table
+  exit 1
+fi
+echo "Found CloudFront Distribution Domain: $CLOUDFRONT_DOMAIN"
 
 # Get the Cognito User Pool ID and Client ID using the exact output keys
 AUTH_STACK_NAME="${STACK_NAME}AuthStack"
@@ -556,10 +597,7 @@ echo "User Pool ID: $USER_POOL_ID"
 echo "User Pool Client ID: $USER_POOL_CLIENT_ID"
 echo "Identity Pool ID: $IDENTITY_POOL_ID"
 
-# Get the S3 bucket name from the StorageStack using the exact output key
-STORAGE_STACK_NAME="${STACK_NAME}StorageStack"
-S3_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}DataBucketName'].OutputValue" --output text)
-echo "S3 data bucket name: $S3_BUCKET_NAME"
+
 # Create a temporary file for the ConfigMap YAML
 CONFIG_MAP_FILE=$(mktemp)
 echo "Creating ConfigMap in temporary file: $CONFIG_MAP_FILE"
@@ -572,16 +610,16 @@ metadata:
   name: ${STACK_NAME}-app-config
   namespace: ${STACK_NAME}-app
 data:
-  BD_GUARDRAIL_IDENTIFIER: "${BD_GUARDRAIL_IDENTIFIER}"
-  BD_GUARDRAIL_VERSION: "${BD_GUARDRAIL_VERSION}"
-  BD_KB_ID: "${BD_KB_ID}"
+  BD_GUARDRAIL_IDENTIFIER: "${GUARDRAIL_IDENTIFIER}"
+  BD_GUARDRAIL_VERSION: "${GUARDRAIL_VERSION}"
+  BD_KB_ID: "${KB_ID}"
   BEDROCK_MODEL_ID: "${BEDROCK_MODEL_ID}"
   AWS_DEFAULT_REGION: "${AWS_REGION}"
   AWS_REGION: "${AWS_REGION}"
   STACK_NAME: "${STACK_NAME}"
   STACK_ENVIRONMENT: "${STACK_ENVIRONMENT}"
   S3_BUCKET_NAME: "${S3_BUCKET_NAME}"
-  DOMAIN_NAME: "${DOMAIN_NAME}"
+  DOMAIN_NAME: "${CLOUDFRONT_DOMAIN}"
   COGNITO_USER_POOL_ID: "${USER_POOL_ID}"
   COGNITO_APP_CLIENT_ID: "${USER_POOL_CLIENT_ID}"
   COGNITO_IDENTITY_POOL_ID: "${IDENTITY_POOL_ID}"
@@ -725,8 +763,8 @@ ACCESS_LOGS_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name $STORA
 echo "Access Logs Bucket Name: $ACCESS_LOGS_BUCKET_NAME"
 
 
-# Create Ingress with SSL
-echo "Creating Ingress resources with SSL..."
+# Create Ingress
+echo "Creating Ingress resources with ..."
 # Add debug statements to help pinpoint the error
 echo "DEBUG: About to create Ingress YAML"
 echo "DEBUG: ACCESS_LOGS_BUCKET_NAME = $ACCESS_LOGS_BUCKET_NAME"
@@ -742,8 +780,7 @@ metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: "internet-facing"
     alb.ingress.kubernetes.io/target-type: "ip"
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: "${CERTIFICATE_ARN}"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
     alb.ingress.kubernetes.io/security-groups: "${ALB_SECURITY_GROUP_ID}"
     # WebSocket support configuration
     alb.ingress.kubernetes.io/backend-protocol-version: "HTTP1"
@@ -757,7 +794,6 @@ metadata:
       idle_timeout.timeout_seconds=600,
       access_logs.s3.enabled=true,
       access_logs.s3.bucket=${ACCESS_LOGS_BUCKET_NAME}
-    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS-1-2-Ext-2018-06"
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-port: "8000"
     alb.ingress.kubernetes.io/healthcheck-path: "/health"
@@ -819,37 +855,6 @@ echo "Website Bucket Name: $WEBSITE_BUCKET_NAME"
 DATA_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}DataBucketName'].OutputValue" --output text)
 echo "Data Bucket Name: $DATA_BUCKET_NAME"
 
-# Update the website bucket name in the .env file
-update_env_var "WEBSITE_BUCKET_NAME" "$WEBSITE_BUCKET_NAME"
-
-# Update the data bucket name in the .env file
-update_env_var "S3_BUCKET_NAME" "$DATA_BUCKET_NAME"
-
-# Update the user pool id in the .env file
-update_env_var "COGNITO_USER_POOL_ID" "$USER_POOL_ID"
-
-# Update the user pool client id in the .env file
-update_env_var "COGNITO_APP_CLIENT_ID" "$USER_POOL_CLIENT_ID"
-
-# Update the identity pool id in the .env file
-update_env_var "COGNITO_IDENTITY_POOL_ID" "$IDENTITY_POOL_ID"
-
-
-
-
-# Get the CloudFront distribution domain name using the exact output key
-echo "Retrieving CloudFront distribution domain from CloudFormation..."
-CLOUDFRONT_DOMAIN=$(aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='${STACK_NAME}CloudFrontDistributionDomainName'].OutputValue" --output text)
-if [ -z "$CLOUDFRONT_DOMAIN" ]; then
-  echo "Error: Could not retrieve CloudFront distribution domain from CloudFormation."
-  echo "Checking all available outputs from the storage stack..."
-  aws cloudformation describe-stacks --stack-name $STORAGE_STACK_NAME --query "Stacks[0].Outputs" --output table
-  exit 1
-fi
-echo "Found CloudFront Distribution Domain: $CLOUDFRONT_DOMAIN"
-
-
-
 # Get the API endpoints
 echo "Retrieving ALB endpoint..."
 BACKEND_ALB=$(kubectl get ingress ${STACK_NAME}-ingress -n ${STACK_NAME}-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
@@ -882,87 +887,249 @@ if [ -z "$BACKEND_ALB" ] || [ "$ALB_STATUS" != "active" ]; then
   echo "Continuing with deployment as ALB may still become available..."
 fi
 
-# Get the hosted zone ID with more verbose logging
-echo "Retrieving hosted zone ID..."
-HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name --dns-name ${PARENT_DOMAIN_NAME} --query 'HostedZones[0].Id' --output text | cut -d'/' -f3)
-if [ -z "$HOSTED_ZONE_ID" ]; then
-  echo "Error: Could not retrieve hosted zone ID. Please check your Route53 configuration."
-  exit 1
+
+# Add ALB as a second origin to CloudFront distribution
+echo "Adding ALB as a second origin to CloudFront distribution..."
+DISTRIBUTION_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='$CLOUDFRONT_DOMAIN'].Id" --output text)
+
+
+if [ -n "$DISTRIBUTION_ID" ] && [ -n "$BACKEND_ALB" ]; then
+  echo "Found CloudFront distribution ID: $DISTRIBUTION_ID"
+  echo "Found ALB endpoint: $BACKEND_ALB"
+  
+  # Get the current CloudFront configuration
+  echo "Getting current CloudFront configuration..."
+  aws cloudfront get-distribution-config --id $DISTRIBUTION_ID > cloudfront-config.json
+  
+  # Check if the distribution already has more than one origin
+  ORIGIN_COUNT=$(jq '.DistributionConfig.Origins.Quantity' cloudfront-config.json)
+  echo "Current number of origins: $ORIGIN_COUNT"
+  
+  if [ "$ORIGIN_COUNT" -gt 1 ]; then
+    echo "CloudFront distribution already has multiple origins. Skipping update to avoid adding duplicate origins."
+  else
+    echo "CloudFront distribution has only one origin. Proceeding with update..."
+  
+    # Parameters
+    CONFIG_FILE=cloudfront-config.json
+    ALB_DOMAIN=$BACKEND_ALB
+
+    # Make a backup of the original config
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.original"
+
+    # Remove the ETag from the config file
+    sed -i.bak '/"ETag"/d' "$CONFIG_FILE"
+
+    # Create a temporary file for processing
+    TMP_FILE=$(mktemp)
+
+    # Step 1: Update Origins - Add ALB origin and update quantity
+    jq --arg domain "$ALB_DOMAIN" '.DistributionConfig.Origins.Quantity = 2 | 
+        .DistributionConfig.Origins.Items += [{
+            "Id": "ALBOrigin",
+            "DomainName": $domain,
+            "OriginPath": "",
+            "CustomOriginConfig": {
+                "HTTPPort": 80,
+                "HTTPSPort": 443,
+                "OriginProtocolPolicy": "http-only",
+                "OriginKeepaliveTimeout": 60,
+                "OriginSslProtocols": {
+                    "Quantity": 1,
+                    "Items": ["TLSv1.2"]
+                },
+                "OriginReadTimeout": 30,
+                "OriginKeepaliveTimeout": 5
+            },
+            "CustomHeaders": {
+                "Quantity": 0,
+                "Items": []
+            },
+            "ConnectionAttempts": 3,
+            "ConnectionTimeout": 10,
+            "OriginShield": {
+                "Enabled": false
+            },
+            "OriginAccessControlId": ""
+        }]' "$CONFIG_FILE" > "$TMP_FILE"
+
+    # Step 2: Update CacheBehaviors - Add API and WebSocket behaviors
+    jq '.DistributionConfig.CacheBehaviors.Quantity = 2 | 
+        .DistributionConfig.CacheBehaviors.Items = [
+            {
+                "PathPattern": "/api/*",
+                "TargetOriginId": "ALBOrigin",
+                "TrustedSigners": {
+                    "Enabled": false,
+                    "Quantity": 0
+                },
+                "TrustedKeyGroups": {
+                    "Enabled": false,
+                    "Quantity": 0
+                },
+                "ViewerProtocolPolicy": "redirect-to-https",
+                "AllowedMethods": {
+                    "Quantity": 7,
+                    "Items": ["GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS", "DELETE"],
+                    "CachedMethods": {
+                        "Quantity": 2,
+                        "Items": ["GET", "HEAD"]
+                    }
+                },
+                "ForwardedValues": {
+                    "QueryString": true,
+                    "Cookies": {
+                        "Forward": "all"
+                    },
+                    "Headers": {
+                        "Quantity": 7,
+                        "Items": ["Host", "Authorization", "Origin", "Referer", "Accept", "Accept-Language", "Content-Type"]
+                    },
+                    "QueryStringCacheKeys": {
+                        "Quantity": 0,
+                        "Items": []
+                    },
+                    "QueryString": true
+                },
+                "MinTTL": 0,
+                "DefaultTTL": 0,
+                "MaxTTL": 0,
+                "Compress": true,
+                "SmoothStreaming": false,
+                "FieldLevelEncryptionId": "",
+                "LambdaFunctionAssociations": {
+                    "Quantity": 0,
+                    "Items": []
+                },
+                "FunctionAssociations": {
+                    "Quantity": 0,
+                    "Items": []
+                },
+                "GrpcConfig": {
+                    "Enabled": false
+                }
+            },
+            {
+                "PathPattern": "/ws/*",
+                "TargetOriginId": "ALBOrigin",
+                "TrustedSigners": {
+                    "Enabled": false,
+                    "Quantity": 0
+                },
+                "TrustedKeyGroups": {
+                    "Enabled": false,
+                    "Quantity": 0
+                },
+                "ViewerProtocolPolicy": "redirect-to-https",
+                "AllowedMethods": {
+                    "Quantity": 7,
+                    "Items": ["GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS", "DELETE"],
+                    "CachedMethods": {
+                        "Quantity": 2,
+                        "Items": ["GET", "HEAD"]
+                    }
+                },
+                "ForwardedValues": {
+                    "QueryString": true,
+                    "Cookies": {
+                        "Forward": "all"
+                    },
+                    "Headers": {
+                        "Quantity": 7,
+                        "Items": ["Host", "Authorization", "Origin", "Referer", "Accept", "Accept-Language", "Content-Type"]
+                    },
+                    "QueryStringCacheKeys": {
+                        "Quantity": 0,
+                        "Items": []
+                    }
+                },
+                "MinTTL": 0,
+                "DefaultTTL": 0,
+                "MaxTTL": 0,
+                "Compress": true,
+                "SmoothStreaming": false,
+                "FieldLevelEncryptionId": "",
+                "LambdaFunctionAssociations": {
+                    "Quantity": 0,
+                    "Items": []
+                },
+                "FunctionAssociations": {
+                    "Quantity": 0,
+                    "Items": []
+                },
+                "GrpcConfig": {
+                    "Enabled": false
+                }
+            }
+        ]' "$TMP_FILE" > "updated-config.json"
+
+    # Step 3: Ensure DefaultRootObject is set
+    jq '.DistributionConfig.DefaultRootObject = "index.html"' "updated-config.json" > "$TMP_FILE"
+    mv "$TMP_FILE" "updated-config.json"
+
+    echo "Updated CloudFront configuration saved to updated-config.json"
+    echo "Original configuration backed up to ${CONFIG_FILE}.original"
+
+    # Get the ETag for the distribution
+    ETAG=$(aws cloudfront get-distribution --id "$DISTRIBUTION_ID" --query 'ETag' --output text)
+    if [ -z "$ETAG" ]; then
+      echo "Error: Could not retrieve ETag for distribution $DISTRIBUTION_ID"
+      exit 1
+    fi
+
+    echo "Updating CloudFront distribution $DISTRIBUTION_ID with ETag $ETAG"
+
+    # Update the CloudFront distribution
+    aws cloudfront update-distribution --id "$DISTRIBUTION_ID" --if-match "$ETAG" --cli-input-json file://updated-config.json
+
+    if [ $? -eq 0 ]; then
+      echo "CloudFront distribution updated successfully"
+    else
+      echo "Failed to update CloudFront distribution"
+      exit 1
+    fi
+    
+    # Clean up temporary files
+    rm -f cloudfront-config.json updated-config.json cloudfront-config.json cloudfront-config.json.original cloudfront-config.json.bak alb-controller-policy.json
+    
+    echo "CloudFront distribution updated with ALB origin for /api/* and /ws/* paths"
+  fi
+else
+  echo "Skipping CloudFront update: Either distribution ID or ALB endpoint not found."
 fi
-echo "Found Hosted Zone ID: $HOSTED_ZONE_ID"
 
-# Create Route53 records for API and WebSocket ALBs with more verbose logging
-echo "Creating Route53 records for API and WebSocket endpoints..."
-
-# Get the ALB hosted zone ID using the DNS name
-echo "Retrieving ALB hosted zone ID..."
-ALB_HOSTED_ZONE_ID=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?DNSName=='$BACKEND_ALB'].CanonicalHostedZoneId" --output text)
-if [ -z "$ALB_HOSTED_ZONE_ID" ]; then
-  echo "Error: Could not retrieve ALB hosted zone ID. Please check your ALB configuration."
-  exit 1
-fi
-echo "Found ALB Hosted Zone ID: $ALB_HOSTED_ZONE_ID"
-
-# Create API record
-echo "Creating API record..."
-aws route53 change-resource-record-sets \
-  --hosted-zone-id $HOSTED_ZONE_ID \
-  --change-batch '{
-    "Changes": [{
-      "Action": "UPSERT",
-      "ResourceRecordSet": {
-        "Name": "backend.'${DOMAIN_NAME}'",
-        "Type": "A",
-        "AliasTarget": {
-          "HostedZoneId": "'${ALB_HOSTED_ZONE_ID}'",
-          "DNSName": "'${BACKEND_ALB}'",
-          "EvaluateTargetHealth": true
-        }
-      }
-    }]
-  }'
-
-echo "Route53 records created successfully."
-
-# Create record for CloudFront
-echo "Creating record for CloudFront..."
-echo "Debug - DOMAIN_NAME: ${DOMAIN_NAME}"
-echo "Debug - CLOUDFRONT_DOMAIN: ${CLOUDFRONT_DOMAIN}"
-echo "Debug - HOSTED_ZONE_ID: ${HOSTED_ZONE_ID}"
-
-if [ -z "$DOMAIN_NAME" ]; then
-  echo "Error: DOMAIN_NAME is empty. Please check your .env file."
-  exit 1
-fi
-
-if [ -z "$CLOUDFRONT_DOMAIN" ]; then
-  echo "Error: CLOUDFRONT_DOMAIN is empty. Please check your CloudFormation stack outputs."
-  exit 1
-fi
-
-if [ -z "$HOSTED_ZONE_ID" ]; then
-  echo "Error: HOSTED_ZONE_ID is empty. Please check your Route53 configuration."
-  exit 1
-fi
-
-aws route53 change-resource-record-sets \
-  --hosted-zone-id $HOSTED_ZONE_ID \
-  --change-batch "{
-    \"Changes\": [{
-      \"Action\": \"UPSERT\",
-      \"ResourceRecordSet\": {
-        \"Name\": \"${DOMAIN_NAME}\",
-        \"Type\": \"A\",
-        \"AliasTarget\": {
-          \"HostedZoneId\": \"Z2FDTNDATAQYW2\",
-          \"DNSName\": \"${CLOUDFRONT_DOMAIN}\",
-          \"EvaluateTargetHealth\": false
-        }
-      }
-    }]
-  }"
-
-echo "Route53 records created successfully."
+# Create a .env file for the backend app
+echo "Creating .env file for the backend app..."
+cat > ../source/backend/.env << EOF
+AWS_REGION=${AWS_REGION}
+COGNITO_USER_POOL_ID=${USER_POOL_ID}
+COGNITO_APP_CLIENT_ID=${USER_POOL_CLIENT_ID}
+COGNITO_IDENTITY_POOL_ID=${IDENTITY_POOL_ID}
+S3_BUCKET_NAME=${DATA_BUCKET_NAME}
+WEBSITE_BUCKET_NAME=${WEBSITE_BUCKET_NAME}
+STACK_NAME=${STACK_NAME}
+STACK_ENVIRONMENT=${STACK_ENVIRONMENT}
+BD_GUARDRAIL_IDENTIFIER=${GUARDRAIL_IDENTIFIER}
+BD_GUARDRAIL_VERSION=${GUARDRAIL_VERSION}
+BD_KB_ID=${KB_ID}
+BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}
+DOMAIN_NAME=${CLOUDFRONT_DOMAIN}
+OTEL_PYTHON_DISTRO=${OTEL_PYTHON_DISTRO}
+OTEL_PYTHON_CONFIGURATOR=${OTEL_PYTHON_CONFIGURATOR}
+OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES}
+AGENT_OBSERVABILITY_ENABLED=${AGENT_OBSERVABILITY_ENABLED}
+OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL}
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
+OTEL_EXPORTER_OTLP_LOGS_HEADERS=${OTEL_EXPORTER_OTLP_LOGS_HEADERS}
+OTEL_PYTHON_FASTAPI_EXCLUDED_URLS=${OTEL_PYTHON_FASTAPI_EXCLUDED_URLS}
+OTEL_PYTHON_REQUESTS_EXCLUDED_URLS=${OTEL_PYTHON_REQUESTS_EXCLUDED_URLS}
+OTEL_PYTHON_URLLIB3_EXCLUDED_URLS=${OTEL_PYTHON_URLLIB3_EXCLUDED_URLS}
+OTEL_PYTHON_HTTPX_EXCLUDED_URLS=${OTEL_PYTHON_HTTPX_EXCLUDED_URLS}
+OTEL_PYTHON_AIOHTTP_CLIENT_EXCLUDED_URLS=${OTEL_PYTHON_AIOHTTP_CLIENT_EXCLUDED_URLS}
+OTEL_PYTHON_BOTO3SQS_EXCLUDED_URLS=${OTEL_PYTHON_BOTO3SQS_EXCLUDED_URLS}
+OTEL_PYTHON_BOTOCORE_EXCLUDED_URLS=${OTEL_PYTHON_BOTOCORE_EXCLUDED_URLS}
+OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=${OTEL_PYTHON_DISABLED_INSTRUMENTATIONS}
+EOF
 
 
 # Create a .env file for the frontend app
@@ -972,8 +1139,8 @@ VITE_AWS_REGION=${AWS_REGION}
 VITE_USER_POOL_ID=${USER_POOL_ID}
 VITE_USER_POOL_CLIENT_ID=${USER_POOL_CLIENT_ID}
 VITE_IDENTITY_POOL_ID=${IDENTITY_POOL_ID}
-VITE_RESTAPI_URL=https://backend.${DOMAIN_NAME}/api
-VITE_WEBSOCKET_URL=https://backend.${DOMAIN_NAME}/ws
+VITE_RESTAPI_URL=https://${CLOUDFRONT_DOMAIN}/api
+VITE_WEBSOCKET_URL=https://${CLOUDFRONT_DOMAIN}/ws
 EOF
 
 # Build the frontend app
@@ -992,40 +1159,11 @@ npm run build
 echo "Deploying frontend app to S3 bucket: $WEBSITE_BUCKET_NAME"
 aws s3 sync dist/ s3://$WEBSITE_BUCKET_NAME/ --delete
 
-
-
+ 
 # Invalidate CloudFront cache
 echo "Invalidating CloudFront cache..."
-DISTRIBUTION_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='$CLOUDFRONT_DOMAIN'].Id" --output text)
-if [ -n "$DISTRIBUTION_ID" ]; then
-  aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths "/*" | cat
-  echo "CloudFront cache invalidation created for distribution: $DISTRIBUTION_ID"
-else
-  echo "Could not find CloudFront distribution ID for domain: $CLOUDFRONT_DOMAIN"
-fi
-
-cd ../../deployment
-
-# Display the CloudFront distribution domain name
-echo "--------------------------------"
-echo "Frontend URL: https://$DOMAIN_NAME"
-echo "--------------------------------"
-echo "Login EMAIL: $EMAIL"
-echo "--------------------------------"
-echo "Temporary Login PASSWORD: $COGNITO_PASSWORD"
-echo "--------------------------------"
-echo "CloudFront URL: https://$CLOUDFRONT_DOMAIN"
-echo "--------------------------------"
-# Get and display the ALB endpoint
-echo "Retrieving ALB endpoint (may take a few minutes to be available)..."
-sleep 30
-
-if [ -n "$BACKEND_ALB" ]; then
-  echo "BACKEND Endpoint: https://api.${DOMAIN_NAME} (ALB: $BACKEND_ALB)"
-else
-  echo "BACKEND ALB not yet available. Check status with: kubectl get ingress ${STACK_NAME}-ingress -n ${STACK_NAME}-app"
-fi
-echo "--------------------------------"
+aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths "/*" | cat
+echo "CloudFront cache invalidation created for distribution: $DISTRIBUTION_ID"
 
 
 # Display kubectl commands for monitoring
@@ -1037,3 +1175,10 @@ echo "kubectl get ingress -n ${STACK_NAME}-app"
 echo ""
 echo "To view logs:"  
 echo "kubectl logs -n ${STACK_NAME}-app -l app=${STACK_NAME}-backend"
+
+# Display the CloudFront distribution domain name
+echo "--------------------------------"
+echo "Frontend URL: https://$CLOUDFRONT_DOMAIN"
+echo "--------------------------------"
+echo "Login EMAIL: $EMAIL"
+echo "--------------------------------"

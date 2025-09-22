@@ -14,8 +14,6 @@ export interface EksStackProps extends cdk.StackProps {
   environment: string;
   vpc: ec2.Vpc;
   authenticatedRole: iam.Role;
-  domainName: string;
-  certificateArn: string;
   dataBucket: s3.Bucket;
 }
 
@@ -75,26 +73,110 @@ export class EksStack extends cdk.Stack {
       });
     }
 
-    // Create or import Bedrock AgentCore observability log group
+    // Handle the Bedrock AgentCore observability log group creation safely
     const bedrockObservabilityLogGroupName = 'bedrock-agentcore-observability';
-    let bedrockObservabilityLogGroup: logs.ILogGroup;
-
-    try {
-      // Try to import existing log group
-      bedrockObservabilityLogGroup = logs.LogGroup.fromLogGroupName(
-        this,
-        `${resourcePrefix}-ImportedBedrockObservabilityLogGroup`,
-        bedrockObservabilityLogGroupName
-      );
-      console.log(`Imported existing log group: ${bedrockObservabilityLogGroupName}`);
-    } catch (e) {
-      // Create new log group if import fails
-      bedrockObservabilityLogGroup = new logs.LogGroup(this, `${resourcePrefix}-BedrockObservabilityLogGroup`, {
-        logGroupName: bedrockObservabilityLogGroupName,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-        retention: logs.RetentionDays.ONE_WEEK, // Set retention for observability logs
-      });
-    }
+    
+    // First, import the log group reference (this doesn't check if it exists)
+    const bedrockObservabilityLogGroup = logs.LogGroup.fromLogGroupName(
+      this,
+      `${resourcePrefix}-ImportedBedrockObservabilityLogGroup`,
+      bedrockObservabilityLogGroupName
+    );
+    
+    // Use AWS SDK via a custom resource to check if the log group exists
+    // and create it if it doesn't exist
+    const checkAndCreateLogGroup = new cdk.custom_resources.AwsCustomResource(this, `${resourcePrefix}-CheckAndCreateLogGroup`, {
+      onCreate: {
+        service: 'CloudWatchLogs',
+        action: 'describeLogGroups',
+        parameters: {
+          logGroupNamePrefix: bedrockObservabilityLogGroupName
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${bedrockObservabilityLogGroupName}-check`),
+      },
+      onUpdate: {
+        service: 'CloudWatchLogs',
+        action: 'describeLogGroups',
+        parameters: {
+          logGroupNamePrefix: bedrockObservabilityLogGroupName
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${bedrockObservabilityLogGroupName}-check`),
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: cdk.custom_resources.AwsCustomResourcePolicy.ANY_RESOURCE
+      })
+    });
+    
+    // Create a Lambda function to process the result and create the log group if needed
+    const createLogGroupIfNeeded = new cdk.custom_resources.AwsCustomResource(this, `${resourcePrefix}-CreateLogGroupIfNeeded`, {
+      onCreate: {
+        service: 'CloudWatchLogs',
+        action: 'createLogGroup',
+        parameters: {
+          logGroupName: bedrockObservabilityLogGroupName,
+          // Remove tags to avoid needing logs:TagResource permission
+          // tags: {
+          //   'ManagedBy': 'CDK',
+          //   'Purpose': 'Bedrock AgentCore Observability'
+          // }
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${bedrockObservabilityLogGroupName}-create`),
+        ignoreErrorCodesMatching: 'ResourceAlreadyExistsException' // Ignore if already exists
+      },
+      onUpdate: {
+        service: 'CloudWatchLogs',
+        action: 'putRetentionPolicy',
+        parameters: {
+          logGroupName: bedrockObservabilityLogGroupName,
+          retentionInDays: 7 // ONE_WEEK
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${bedrockObservabilityLogGroupName}-update`),
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'logs:CreateLogGroup',
+            'logs:DescribeLogGroups',
+            'logs:PutRetentionPolicy',
+            'logs:TagResource'  // Add explicit permission for tagging
+          ],
+          resources: ['*']
+        })
+      ])
+    });
+    
+    // Ensure the check happens before the create
+    createLogGroupIfNeeded.node.addDependency(checkAndCreateLogGroup);
+    
+    // Create the default log stream in the log group
+    const createLogStream = new cdk.custom_resources.AwsCustomResource(this, `${resourcePrefix}-CreateLogStream`, {
+      onCreate: {
+        service: 'CloudWatchLogs',
+        action: 'createLogStream',
+        parameters: {
+          logGroupName: bedrockObservabilityLogGroupName,
+          logStreamName: 'default'
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${bedrockObservabilityLogGroupName}-default-stream`),
+        ignoreErrorCodesMatching: 'ResourceAlreadyExistsException' // Ignore if already exists
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'logs:CreateLogStream',
+            'logs:DescribeLogStreams'
+          ],
+          resources: ['*']
+        })
+      ])
+    });
+    
+    // Ensure the log group is created before the log stream
+    createLogStream.node.addDependency(createLogGroupIfNeeded);
+    
+    console.log(`Ensured log group and default stream exist: ${bedrockObservabilityLogGroupName}`);
 
     // Create a dedicated security group for the ALB
     this.albSecurityGroup = new ec2.SecurityGroup(this, `${resourcePrefix}-AlbSecurityGroup`, {

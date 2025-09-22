@@ -8,6 +8,7 @@ export interface AuthStackProps extends cdk.StackProps {
   resourcePrefix: string;
   environment: string;
   emailAddress: string;
+  initialPassword: string;
 }
 
 export class AuthStack extends cdk.Stack {
@@ -74,7 +75,7 @@ export class AuthStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       environment: {
-        COGNITO_PASSWORD: process.env.COGNITO_PASSWORD || 'TempPassword123!'
+        COGNITO_PASSWORD: props.initialPassword || 'TempPassword123!'
       },
       code: lambda.Code.fromInline(`
 import json
@@ -175,12 +176,6 @@ def handler(event, context):
     // Output the Cognito Identity Pool Id
     new cdk.CfnOutput(this, `${resourcePrefix}-IdentityPoolId`, {
       value: this.identityPool.ref,
-    });
-    
-    // Output the created user email
-    new cdk.CfnOutput(this, `${resourcePrefix}-InitialUserEmail`, {
-      value: props.emailAddress,
-      description: 'Email address of the initial admin user created in Cognito'
     });
 
     // Create roles for authenticated users

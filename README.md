@@ -44,7 +44,7 @@ The application is deployed on AWS using the following services:
 - **Amazon OpenSearch**: Vector Store for standard operating procedure document
 
 
-![Solution Architecture](assets/images/architecture.png)
+![Solution Architecture](assets/images/architecture.jpg)
 
 The architecture is organized into several logical stacks:
 

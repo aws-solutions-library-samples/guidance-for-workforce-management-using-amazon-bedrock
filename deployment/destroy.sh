@@ -6,6 +6,17 @@ set -e
 # Disable AWS CLI pager to prevent pausing for user input
 export AWS_PAGER=""
 
+# Load environment variables
+if [ -f .env ]; then
+  echo "Loading environment variables from .env file"
+  set -a
+  source .env
+  set +a
+else
+  echo "No .env file found. Please create one with the required variables."
+  exit 1
+fi
+
 # Helper function to check if a stack exists
 stack_exists() {
   local stack_name=$1
@@ -268,7 +279,7 @@ fi
 
 # Delete CDK stacks in correct order
 echo "Deleting CDK stacks in dependency order..."
-cd deployment/cdk
+cd cdk
 
 # Delete stacks in reverse dependency order
 echo "Checking GuardrailsStack..."

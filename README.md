@@ -110,8 +110,8 @@ This deployment requires a Docker environment in the environment from which you 
   * fastapi>=0.68.0
   * uvicorn>=0.15.0
   * starlette>=0.14.2
-  * boto3==1.38.9
-  * botocore==1.38.9
+  * boto3==1.39.7
+  * botocore==1.39.7
   * pydantic>=1.8.0
   * python-dotenv>=0.19.0
   * python-dateutil>=2.8.2
@@ -122,9 +122,9 @@ This deployment requires a Docker environment in the environment from which you 
   * cryptography>=41.0.0
   * pyaudio>=0.2.13
   * rx>=3.2.0
-  * smithy-aws-core>=0.0.1
+  * smithy-aws-core>=0.1.0
   * pytz
-  * aws_sdk_bedrock_runtime==0.0.2
+  * aws_sdk_bedrock_runtime==0.1.0
   * websockets==15.0.1
   * Pillow>=10.0.0
   * python-multipart

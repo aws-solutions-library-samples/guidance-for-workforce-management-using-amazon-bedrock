@@ -10,12 +10,12 @@ import numpy as np
 import pathlib
 from aws_sdk_bedrock_runtime.client import BedrockRuntimeClient, InvokeModelWithBidirectionalStreamOperationInput
 from aws_sdk_bedrock_runtime.models import InvokeModelWithBidirectionalStreamInputChunk, BidirectionalInputPayloadPart, ServiceError
-from aws_sdk_bedrock_runtime.config import Config, HTTPAuthSchemeResolver, SigV4AuthScheme
+from aws_sdk_bedrock_runtime.config import Config
 
-from smithy_aws_core.credentials_resolvers.container import ContainerCredentialsResolver
-from smithy_http.aio.aiohttp import AIOHTTPClient, AIOHTTPClientConfig
+from smithy_aws_core.identity import EnvironmentCredentialsResolver, ContainerCredentialsResolver
 from aws_sdk_signers import AWSCredentialIdentity
-from smithy_core.exceptions import SmithyIdentityException
+
+from smithy_http.aio.aiohttp import AIOHTTPClient, AIOHTTPClientConfig
 import boto3
 
 # Suppress warnings
@@ -92,6 +92,7 @@ except ImportError as e:
 
 import base64
 from restapi import ToolsList, LocalDBService
+import os
 
 STACK_PREFIX = os.environ['STACK_NAME']
 print(f"STACK_PREFIX: {STACK_PREFIX}")
@@ -834,9 +835,7 @@ class S2sSessionManager:
                     self.secret_key = secret_key
                     self.session_token = session_token
 
-                async def get_identity(self, identity_properties=None):
-                    # returning a plain dataclass is fine; 
-                    # wrapping in async lets Config await it
+                async def get_identity(self, properties=None):
                     return AWSCredentialIdentity(
                         access_key_id=self.access_key,
                         secret_access_key=self.secret_key,
@@ -854,39 +853,36 @@ class S2sSessionManager:
                 endpoint_uri=f"https://bedrock-runtime.{self.region}.amazonaws.com",
                 region=self.region,
                 aws_credentials_identity_resolver=credentials_resolver,
-                http_auth_scheme_resolver=HTTPAuthSchemeResolver(),
-                http_auth_schemes={"aws.auth#sigv4": SigV4AuthScheme()}
             )
-        else:
+
+        elif 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI' in os.environ or 'AWS_CONTAINER_CREDENTIALS_FULL_URI' in os.environ:
             logger.info("Using default AWS credentials from environment or IAM role")
             
-            # Create a client configuration
             client_config = AIOHTTPClientConfig()
-            
-            # Create an HTTP client with the configuration
             http_client = AIOHTTPClient(client_config=client_config)
+            
+            # Create credentials resolver with required http_client
             credentials_resolver = ContainerCredentialsResolver(http_client)
         
             config = Config(
                 endpoint_uri=f"https://bedrock-runtime.{self.region}.amazonaws.com",
                 region=self.region,
                 aws_credentials_identity_resolver=credentials_resolver,
-                http_auth_scheme_resolver=HTTPAuthSchemeResolver(),
-                http_auth_schemes={"aws.auth#sigv4": SigV4AuthScheme()}
             )
+        else:
+            logger.info("Using default AWS credentials from environment")
+            config = Config(
+                        endpoint_uri=f"https://bedrock-runtime.{self.region}.amazonaws.com",
+                        region=self.region,
+                        aws_credentials_identity_resolver=EnvironmentCredentialsResolver()
+
+                    )
+    
 
         # Initialize the Bedrock client with the configuration
         self.bedrock_client = BedrockRuntimeClient(config=config)
-        
-        # Log environment variables for debugging (without exposing secrets)
-        if hasattr(self, 'user_info') and self.user_info and 'aws_credentials' in self.user_info:
-            aws_creds = self.user_info['aws_credentials']
-            logger.info(f"Bedrock client initialized with user credentials: {aws_creds['access_key'][:5]}...")
-        else:
-            access_key = os.environ.get('AWS_ACCESS_KEY_ID', '')
-            logger.info(f"Bedrock client initialized with access key: {access_key[:5]}..." if access_key else "No access key found")
-            session_token = os.environ.get('AWS_SESSION_TOKEN', '')
-            logger.info(f"Session token present: {'Yes' if session_token else 'No'}")
+        logger.info(f"Bedrock client initialized with region: {self.region}")
+
 
     async def initialize_stream(self):
         """Initialize the bidirectional stream with Bedrock."""

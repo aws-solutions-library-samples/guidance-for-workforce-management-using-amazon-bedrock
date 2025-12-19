@@ -172,7 +172,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         
 
         logger.info(f"Set user_info on stream_manager for user: {user_info['user_id']}, session: {session_id}")
-        stream_manager = S2sSessionManager(model_id='amazon.nova-sonic-v1:0', 
+        stream_manager = S2sSessionManager(model_id='amazon.nova-2-sonic-v1:0', 
                                             region=os.environ["AWS_REGION"],
                                             session_id=session_id,
                                             user_info=user_info)

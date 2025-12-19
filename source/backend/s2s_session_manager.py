@@ -199,7 +199,7 @@ Important Guidelines:
 class S2sSessionManager:
     """Manages bidirectional streaming with AWS Bedrock using asyncio"""
     
-    def __init__(self, model_id='amazon.nova-sonic-v1:0', region='us-east-1',session_id=None, user_info=None):
+    def __init__(self, model_id='amazon.nova-2-sonic-v1:0', region='us-east-1',session_id=None, user_info=None):
         """Initialize the stream manager."""
         self.model_id = model_id
         self.region = region

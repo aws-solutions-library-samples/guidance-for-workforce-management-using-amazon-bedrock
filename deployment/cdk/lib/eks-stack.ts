@@ -522,7 +522,10 @@ export class EksStack extends cdk.Stack {
         'bedrock:InvokeModelWithResponseStream',
       ],
       resources: [
-        // Foundation models
+      // Foundation models without account (global models)
+        `arn:aws:bedrock:::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:::foundation-model/amazon.titan-*`,
         `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*`,
         `arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-*`,
         `arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-*`,
@@ -532,15 +535,9 @@ export class EksStack extends cdk.Stack {
         `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-*`,
         `arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-*`,
         `arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-*`,
-        `arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-*`,
-        `arn:aws:bedrock:eu-west-1::foundation-model/amazon.nova-*`,
-        `arn:aws:bedrock:eu-west-1::foundation-model/amazon.titan-*`,
-        `arn:aws:bedrock:ap-southeast-1::foundation-model/anthropic.claude-*`,
-        `arn:aws:bedrock:ap-southeast-1::foundation-model/amazon.nova-*`,
-        `arn:aws:bedrock:ap-southeast-1::foundation-model/amazon.titan-*`,
-        `arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-*`,
-        `arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.nova-*`,
-        `arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.titan-*`,
+        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-*`,
         // Inference profiles (cross-region and account-specific)
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
         `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/*`,

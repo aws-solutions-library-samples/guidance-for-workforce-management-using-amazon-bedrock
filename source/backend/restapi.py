@@ -254,7 +254,7 @@ def retry_with_backoff(max_retries=5,
 
 
 load_dotenv()
-BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-3-5-haiku-20241022-v1:0')
+BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.amazon.nova-2-lite-v1:0')
 
 DEFAUL_SYSTEM_PROMPT = os.getenv('DEFAUL_SYSTEM_PROMPT', """<{randomized}>You are a professional retail store assistant focused on efficiency and accuracy. Your responses will be formatted in markdown.
 
@@ -1607,9 +1607,9 @@ class LocalBedrockService:
                     'guardrailVersion': GUARDRAIL_VERSION,
                     # 'trace': 'enabled'|'disabled'
                 },
-                'performanceConfig': {
-                    'latency': 'optimized'
-                }
+                # 'performanceConfig': {
+                #     'latency': 'optimized'
+                # }
             }
             
             # Only add toolConfig if it's not None

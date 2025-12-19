@@ -4,11 +4,11 @@ uvicorn>=0.15.0
 starlette>=0.14.2
 
 # AWS dependencies
-boto3==1.39.7
-botocore==1.39.7
+boto3==1.41.2
+botocore==1.41.2
 
 # OpenTelemetry dependencies
-aws-opentelemetry-distro~=0.10.1
+aws-opentelemetry-distro~=0.12.2
 
 # Data validation and serialization
 pydantic>=1.8.0
@@ -37,7 +37,7 @@ smithy_aws_core>=0.1.0
 smithy_http>=0.1.0  
 aws_sdk_signers>=0.0.1
 pytz
-aws_sdk_bedrock_runtime==0.1.0
+aws_sdk_bedrock_runtime==0.2.0
 numpy>=1.24.0
 
 websockets==15.0.1

@@ -35,8 +35,6 @@ The application is deployed on AWS using the following services:
 - **Amazon EKS**: For container orchestration without managing servers
 - **Amazon ECR**: For storing Docker images
 - **Application Load Balancer (ALB)**: For routing traffic to the services
-- **Amazon Route53**: For DNS management (optional)
-- **AWS Certificate Manager**: For SSL/TLS certificates
 - **Amazon Cognito**: For user authentication
 - **Amazon DynamoDB**: For data storage
 - **Amazon S3 & CloudFront**: For hosting the web frontend
@@ -48,7 +46,7 @@ The application is deployed on AWS using the following services:
 
 The architecture is organized into several logical stacks:
 
-1. **Frontend Infrastructure**: Hosts the web application using S3 and CloudFront with Route 53 for DNS
+1. **Frontend Infrastructure**: Hosts the web application using S3 and CloudFront
 2. **Authentication**: Manages user authentication and authorization using Cognito and IAM
 3. **Container Infrastructure**: Runs the application backend service using EKS, and ECR
 4. **Data Layer**: Stores and manages data using DynamoDB, OpenSearch, and Bedrock
@@ -56,7 +54,7 @@ The architecture is organized into several logical stacks:
 
 ### Cost
 
-You are responsible for the cost of the AWS services used while running this Guidance. As of May 2025, the cost for running this Guidance with the default settings in the AWS Region US East 1 (N. Virginia) is approximately $529.63 per month.
+You are responsible for the cost of the AWS services used while running this Guidance. As of December 2025, the cost for running this Guidance with the default settings in the AWS Region US East 1 (N. Virginia) is approximately $529.63 per month.
 
 We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance.
 
@@ -110,8 +108,8 @@ This deployment requires a Docker environment in the environment from which you 
   * fastapi>=0.68.0
   * uvicorn>=0.15.0
   * starlette>=0.14.2
-  * boto3==1.39.7
-  * botocore==1.39.7
+  * boto3==1.41.2
+  * botocore==1.41.2
   * pydantic>=1.8.0
   * python-dotenv>=0.19.0
   * python-dateutil>=2.8.2
@@ -124,7 +122,7 @@ This deployment requires a Docker environment in the environment from which you 
   * rx>=3.2.0
   * smithy-aws-core>=0.1.0
   * pytz
-  * aws_sdk_bedrock_runtime==0.1.0
+  * aws_sdk_bedrock_runtime==0.2.0
   * websockets==15.0.1
   * Pillow>=10.0.0
   * python-multipart
@@ -132,7 +130,7 @@ This deployment requires a Docker environment in the environment from which you 
 
 ### Supported Regions
 
-This solution must be deployed in the US East 1 (N. Virginia) region because the Amazon Nova Sonic speech-to-speech model is only available there.
+This solution must be deployed in a region in which the Amazon Nova Sonic 2 speech to speech model is available.
 
 
 ## Deployment Steps
@@ -144,24 +142,8 @@ This solution must be deployed in the US East 1 (N. Virginia) region because the
    cd guidance-for-workforce-management-using-amazon-bedrock
    ```
 
-### 2. Configure Amazon Bedrock Model Access (one-time setup)
 
-Amazon Bedrock offers a choice of high-performing foundation models (FMs) from leading AI companies like AI21 Labs, Anthropic, Cohere, Meta, Stability AI, and Amazon. In the Amazon Bedrock console, you can see the descriptions for these foundation models by the Base models link in the navigation pane.
-
-You need to request access to the foundation models before using them (see also [documentation here](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access-modify.html)). In the Amazon Bedrock console, do the following:
-
-Go to the [Amazon Bedrock console](https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1). In the navigation pane, select Model access. In the Model access page, you should see a list of base models. Click on the Manage model access button to edit your model access. Select the check box next to the following models to get started.
-
-All Amazon models.
-
-![Amazon Bedrock Model Access](assets/images/0_model_access.png)
-
-If you do not see Nova Sonic, please ensure you are in the us-east-1 region.
-
-Click on the Save changes button and it may take several minutes to save the changes. This also brings you back to the Model access page. Models will show as Access granted on the Model access page under the Access status column, if access is granted.
-
-
-### 3. Configure Environment 
+### 2. Configure Environment 
 
 Go to the deployment directoy.
 
@@ -173,7 +155,7 @@ Then, create a `.env` file in the deployment directory based of the provided `.e
 
 Update the EMAIL and COGNITO_PASSWORD variable for your environment, keep the other variables as-is.
 
-### 4. Run the Deployment Script
+### 3. Run the Deployment Script
 
 The deployment script will:
 1. Deploy the CDK stack with EKS, ECR, and other resources.
@@ -188,7 +170,7 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-### 5. Access the Application
+### 4. Access the Application
 
 After deployment, the script will output:
 - Frontend URL

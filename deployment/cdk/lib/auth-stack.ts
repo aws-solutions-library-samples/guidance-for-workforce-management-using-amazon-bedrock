@@ -305,10 +305,14 @@ def handler(event, context):
         'bedrock:InvokeModelWithResponseStream'
       ],
       resources: [
+        // Global foundation models (no region/account)
+        `arn:aws:bedrock:::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:::foundation-model/amazon.nova-*`,
+        `arn:aws:bedrock:::foundation-model/amazon.titan-*`,
         // Foundation models - specific to commonly used models
         `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-*`,
         `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-*`,
-        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-*`
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-*`,
       ],
       conditions: {
         'StringEquals': {
